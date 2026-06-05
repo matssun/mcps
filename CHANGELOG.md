@@ -18,13 +18,15 @@ process span it.
 
 ### Public-release scope
 
-- Apache-2.0 licensed Rust workspace, nine crates:
+- Apache-2.0 licensed Rust workspace, ten crates:
   `mcps-core` (pure verification), `mcps-host` (client-side ambassador),
   `mcps-transport` (verifying mTLS client), `mcps-proxy` (server-side sidecar
   with TLS termination, OCSP, sandbox, Redis replay, PKCS#11 key sources),
   `mcps-policy` (delegated-authorization profiles, Phase 5),
-  `mcps-conformance` (black-box conformance harness), and three demo crates
-  (`mcps-demo`, `mcps-demo-server`, `mcps-demo-fileserver`).
+  `mcps-conformance` (black-box conformance harness), three demo crates
+  (`mcps-demo`, `mcps-demo-server`, `mcps-demo-fileserver`), and the test-only
+  `mcps-test-paths` helper that lets the same integration tests run under
+  Bazel runfiles OR a plain Cargo build.
 - 19 architecture-decision records under [`docs/adr/`](docs/adr/) covering the
   trust model, core invariants, transport layering, authorization profile
   abstraction, and Phase 7 external backends.

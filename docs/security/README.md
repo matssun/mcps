@@ -57,13 +57,20 @@ what it explicitly does not.
 
 ## Issue tracking
 
-For traceability, two audit-residual issues are filed in this repository's
-GitHub Issues at first public release:
+The two deferred Mediums from the v0.2 audit are filed as separate GitHub
+issues in this repository for forward traceability, both labelled
+`security` / `deferred` / `medium` / `v0.3` and grouped under the
+[`MCP-S v0.3 hardening`](https://github.com/users/matssun/projects/26)
+project:
 
-1. **v0.1 audit — residuals** (filed as closed-at-creation; all v0.1 partials
-   are closed in v0.2.0; included for historical traceability).
-2. **v0.2 audit — residuals** (lists the two deferred Mediums, M01/M02
-   serde_json prefix coupling, with v0.3 plan and rationale).
+1. **Issue #1 — M-01** (`OnBehalfOfMissing` / P005 serde_json prefix coupling).
+2. **Issue #2 — M-02** (`AuthorizationHashMissing` / P007 serde_json prefix
+   coupling; the same v0.3 refactor closes the v0.1 carry-over **M-2** cross-
+   omission case).
+
+The four v0.1-audit partial findings are all closed in v0.2.0 and are not
+filed as issues; their fix locations are recorded in the
+[remediation log](remediation-v0.2.md#01-audit-carry-overs--all-closed-in-v020).
 
 The audit workflow finding store itself (the per-agent JSONL outputs and the
 3-skeptic verification panel records) was generated in the author's monorepo

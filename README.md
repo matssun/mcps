@@ -40,11 +40,11 @@ HostSession client
   -> HostSession response verification
 ```
 
-## Deployment profiles (binary flavors)
+## Deployment profiles
 
-MCP-S ships in two distinct proxy binaries. Which one you run determines which
-controls are available — do not conflate the lean default with the production
-high-assurance profile.
+`mcps-proxy` is one binary. The cargo features you compile it with determine
+which controls are available — do not conflate the lean default with the
+production high-assurance profile.
 
 ### Lean default (no cargo features)
 
@@ -90,16 +90,17 @@ The current implementation does not claim:
 - official MCP extension status;
 - reverse-proxy mTLS integration in the lean default (it is available via the
   forwarded-identity path, but enterprise ingress hardening is delivered through
-  the `mcps_proxy_ext` profile);
+  the high-assurance feature profile);
 - offline-hermetic or air-gapped build reproducibility (the cold-clone gate is
   "no-submodule, lockfile-reproducible with network access to crates.io", not
   offline-hermetic).
 
 Horizontal-scale replay protection, HSM/KMS-backed key custody, full CRL/OCSP
 certificate revocation, OS-level sandboxing of wrapped servers, and signed
-tool-manifest enforcement are implemented in the `mcps_proxy_ext` profile (see
-Deployment profiles); they are **not** provided by the lean `mcps_proxy` default
-and must not be implied for it.
+tool-manifest enforcement are gated on the
+`pkcs11_keysource,redis_replay,online_ocsp` cargo features (see Deployment
+profiles); they are **not** linked into the lean default build and must not be
+implied for it.
 
 ## Extension identifier
 
