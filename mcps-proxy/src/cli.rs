@@ -1195,7 +1195,9 @@ pub fn build_shared_replay_cache(
     max_clock_skew: i64,
     read_timeout: Option<Duration>,
     write_timeout: Option<Duration>,
+    tier: &crate::replay_tier::ReplayDurabilityTier,
 ) -> Result<Box<dyn mcps_core::ReplayCache>, String> {
+    use crate::replay_tier::ReplayDurabilityTier;
     // A disabled socket timeout would re-introduce the hang, so the connect
     // timeout is always bounded: prefer the configured read timeout, else a
     // bounded default.
@@ -1208,6 +1210,26 @@ pub fn build_shared_replay_cache(
         crate::redis_store::system_clock(),
     )
     .map_err(|e| format!("shared replay cache: {e}"))?;
+    // Apply the declared durability tier (ADR-MCPS-020). REDIS_WAIT_QUORUM adds
+    // the per-insert WAIT; REDIS_ASYNC / SINGLE_STORE_FAIL_CLOSED are the plain
+    // SET NX PX path (the tier is the operator's topology assertion). LINEARIZABLE
+    // cannot be backed by Redis — it requires the CP/etcd backend — so it fails
+    // closed here rather than silently over-claiming.
+    let store = match tier {
+        ReplayDurabilityTier::RedisWaitQuorum { quorum, timeout_ms } => {
+            store.with_wait_quorum(*quorum, *timeout_ms)
+        }
+        ReplayDurabilityTier::RedisAsyncBounded
+        | ReplayDurabilityTier::SingleStoreFailClosed => store,
+        ReplayDurabilityTier::Linearizable => {
+            return Err("LINEARIZABLE durability tier requires a CP/linearizable store \
+                        (the etcd backend); the Redis backend cannot provide a \
+                        linearizable guarantee. Use redis-async, \
+                        redis-wait-quorum:<quorum>:<timeout_ms>, or \
+                        single-store-fail-closed."
+                .to_string());
+        }
+    };
     Ok(Box::new(crate::shared_replay::SharedReplayCache::new(
         Box::new(store),
         max_clock_skew,
@@ -1223,11 +1245,13 @@ pub fn build_shared_replay_cache(
     max_clock_skew: i64,
     read_timeout: Option<Duration>,
     write_timeout: Option<Duration>,
+    tier: &crate::replay_tier::ReplayDurabilityTier,
 ) -> Result<Box<dyn mcps_core::ReplayCache>, String> {
-    let _ = (replay_redis_url, max_clock_skew, read_timeout, write_timeout);
+    let _ = (replay_redis_url, max_clock_skew, read_timeout, write_timeout, tier);
     Err("shared replay cache backend is not yet available in this build (the Redis \
-         adapter + crate repin + live-Redis test are tracked separately); use \
-         --replay-cache file for single-node durability"
+         adapter is behind the non-default redis_replay feature; the etcd \
+         LINEARIZABLE backend is tracked separately); use --replay-cache file for \
+         single-node durability"
         .to_string())
 }
 
@@ -2799,6 +2823,7 @@ mod tests {
             300,
             Some(std::time::Duration::from_secs(30)),
             Some(std::time::Duration::from_secs(30)),
+            &crate::replay_tier::ReplayDurabilityTier::RedisAsyncBounded,
         )
         .err()
         .expect("this build must refuse the shared replay cache");
@@ -2839,6 +2864,7 @@ mod tests {
             300,
             Some(connect_timeout),
             Some(std::time::Duration::from_secs(2)),
+            &crate::replay_tier::ReplayDurabilityTier::RedisAsyncBounded,
         );
         let elapsed = start.elapsed();
 

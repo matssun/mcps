@@ -303,22 +303,25 @@ fn run() -> Result<(), String> {
             "mcps-proxy: replay cache = shared (horizontally-scaled replay safety; \
              no shared backend is available in this build yet)"
         );
-        // ADR-MCPS-020: surface the declared durability tier + its honest
-        // guarantee at startup (validated present for a shared store). The backend
-        // label reflects what is actually compiled in this build.
-        if let Some(tier) = &config.replay_durability_tier {
-            let backend = if cfg!(feature = "redis_replay") {
-                "redis"
-            } else {
-                "none"
-            };
-            eprintln!("mcps-proxy: {}", tier.startup_audit_line(backend));
-        }
+        // ADR-MCPS-020: the durability tier is validated present for a shared
+        // store. Surface it + its honest guarantee at startup; the backend label
+        // reflects what is actually compiled in this build.
+        let tier = config
+            .replay_durability_tier
+            .as_ref()
+            .ok_or("--replay-cache shared requires --replay-durability-tier")?;
+        let backend = if cfg!(feature = "redis_replay") {
+            "redis"
+        } else {
+            "none"
+        };
+        eprintln!("mcps-proxy: {}", tier.startup_audit_line(backend));
         let cache = cli::build_shared_replay_cache(
             &url,
             config.max_clock_skew,
             config.limits.read_timeout,
             config.limits.write_timeout,
+            tier,
         )?;
         proxy = proxy.with_replay_cache(cache);
     }

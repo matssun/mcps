@@ -110,6 +110,16 @@ struct ConnectParams {
 /// `Unavailable` (fail closed). The old code retained an UNUSED `client` field and
 /// never re-established the connection, so one transient blip wedged the replay
 /// backend forever.
+/// WAIT durability parameters for the `REDIS_WAIT_QUORUM` tier (ADR-MCPS-020):
+/// after a fresh insert, require `quorum` replica acknowledgements within
+/// `timeout_ms` before reporting `Fresh`, else fail closed (the nonce is not
+/// durably replicated, so a failover could lose it → replay window).
+#[derive(Clone, Copy)]
+struct WaitQuorum {
+    quorum: u32,
+    timeout_ms: u64,
+}
+
 pub struct RedisAtomicReplayStore {
     /// The bounded connect parameters, reused on every reconnect (M19/#4065).
     params: ConnectParams,
@@ -117,6 +127,10 @@ pub struct RedisAtomicReplayStore {
     /// The store's OWN clock (the proxy's impure edge). Read per op to derive the
     /// `PX` TTL window, since the pure `ReplayCache` trait passes `now_unix = 0`.
     clock: UnixClock,
+    /// `Some` for the `REDIS_WAIT_QUORUM` tier — issue `WAIT` after a fresh insert
+    /// and fail closed on insufficient acks (ADR-MCPS-020). `None` = `REDIS_ASYNC`
+    /// / `SINGLE_STORE_FAIL_CLOSED` (plain `SET NX PX`, no replica wait).
+    wait_quorum: Option<WaitQuorum>,
 }
 
 impl RedisAtomicReplayStore {
@@ -172,7 +186,17 @@ impl RedisAtomicReplayStore {
             params,
             conn: Mutex::new(conn),
             clock,
+            wait_quorum: None,
         })
+    }
+
+    /// Enable the `REDIS_WAIT_QUORUM` tier (ADR-MCPS-020): after each fresh insert,
+    /// issue `WAIT <quorum> <timeout_ms>` and fail closed unless at least `quorum`
+    /// replicas acknowledge within the timeout. Without this the store is the
+    /// `REDIS_ASYNC` / `SINGLE_STORE_FAIL_CLOSED` plain `SET NX PX` path.
+    pub fn with_wait_quorum(mut self, quorum: u32, timeout_ms: u64) -> Self {
+        self.wait_quorum = Some(WaitQuorum { quorum, timeout_ms });
+        self
     }
 
     /// The exact `PX` TTL (ms) `insert_if_absent` will apply for `expires_at_unix`,
@@ -256,6 +280,15 @@ fn bounded_connect(params: &ConnectParams) -> Result<redis::Connection, ReplaySt
     }
 }
 
+/// Whether a Redis `WAIT` reply (the number of replicas that acknowledged the
+/// write) satisfies the configured quorum. Pure, so the
+/// fail-closed-on-insufficient-acks decision (ADR-MCPS-020) is unit-testable
+/// without a live multi-replica Redis; the command execution is proven by the
+/// gated live-Redis e2e.
+fn wait_quorum_satisfied(acked_replicas: i64, quorum: u32) -> bool {
+    acked_replicas >= i64::from(quorum)
+}
+
 /// `true` when a Redis error means the connection itself is broken and must be
 /// REPLACED — an IO failure or any error redis-rs classifies as requiring a
 /// reconnect. This is the M19 trigger: such an error gets ONE reconnect-and-retry.
@@ -337,6 +370,8 @@ impl AtomicReplayStore for RedisAtomicReplayStore {
         // growth (DoS). Reading the real `now` here makes `PX` the intended
         // `retain_until - now` WINDOW.
         let ttl_ms = self.ttl_ms_for(expires_at_unix);
+        // Copied out of `self` so the op closure (Fn) captures a plain value.
+        let wait_quorum = self.wait_quorum;
 
         let mut conn = self.conn.lock().map_err(|e| ReplayStoreError::Unavailable {
             details: format!("redis connection mutex poisoned: {e}"),
@@ -363,7 +398,42 @@ impl AtomicReplayStore for RedisAtomicReplayStore {
                     .arg(ttl_ms)
                     .query(conn);
                 match result {
-                    Ok(Some(_)) => OpAttempt::Done(ReplayDecision::Fresh),
+                    Ok(Some(_)) => {
+                        // Fresh insert on the primary. For REDIS_WAIT_QUORUM, require
+                        // replica durability before reporting Fresh (ADR-MCPS-020).
+                        match wait_quorum {
+                            None => OpAttempt::Done(ReplayDecision::Fresh),
+                            Some(WaitQuorum { quorum, timeout_ms }) => {
+                                let acked: Result<i64, redis::RedisError> = redis::cmd("WAIT")
+                                    .arg(quorum)
+                                    .arg(timeout_ms)
+                                    .query(conn);
+                                match acked {
+                                    Ok(n) if wait_quorum_satisfied(n, quorum) => {
+                                        OpAttempt::Done(ReplayDecision::Fresh)
+                                    }
+                                    // Insufficient acks within the timeout: the nonce
+                                    // is NOT durably replicated → fail closed. Fatal
+                                    // (not Transient) so the op is NOT re-run, which
+                                    // would see the just-written key and wrongly
+                                    // report Replay (the SET+WAIT op is not
+                                    // idempotent under retry).
+                                    Ok(n) => OpAttempt::Fatal(ReplayStoreError::Unavailable {
+                                        details: format!(
+                                            "redis WAIT got {n} replica ack(s), need {quorum} \
+                                             within {timeout_ms}ms (fail closed; nonce not \
+                                             durably replicated)"
+                                        ),
+                                    }),
+                                    // A WAIT error is also fail-closed-Fatal, for the
+                                    // same non-idempotency reason.
+                                    Err(e) => OpAttempt::Fatal(ReplayStoreError::Unavailable {
+                                        details: format!("redis WAIT failed: {e}"),
+                                    }),
+                                }
+                            }
+                        }
+                    }
                     Ok(None) => OpAttempt::Done(ReplayDecision::Replay),
                     Err(e) => {
                         let store_error = ReplayStoreError::Unavailable {
@@ -395,10 +465,23 @@ mod tests {
     use super::compute_ttl_ms;
     use super::run_with_reconnect;
     use super::ttl_ms_via_clock;
+    use super::wait_quorum_satisfied;
     use super::OpAttempt;
     use super::RedisAtomicReplayStore;
     use super::ReplayStoreError;
     use super::UnixClock;
+
+    /// PURE, no-Redis proof of the REDIS_WAIT_QUORUM fail-closed boundary
+    /// (ADR-MCPS-020): the configured `quorum` is met only when at least that many
+    /// replicas acknowledge; fewer acks (a `WAIT` timeout returns the partial
+    /// count) is NOT satisfied → the store fails closed.
+    #[test]
+    fn wait_quorum_is_met_only_with_enough_acks() {
+        assert!(wait_quorum_satisfied(2, 2), "exactly quorum acks is satisfied");
+        assert!(wait_quorum_satisfied(3, 2), "more than quorum is satisfied");
+        assert!(!wait_quorum_satisfied(1, 2), "fewer than quorum fails closed");
+        assert!(!wait_quorum_satisfied(0, 1), "zero acks fails closed");
+    }
 
     /// PURE, no-Redis proof that the H-8/H-9 `now = 0` bug is gone: with a real
     /// `now`, the TTL is the intended `retain_until - now` WINDOW (seconds × 1000),
