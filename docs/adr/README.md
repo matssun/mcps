@@ -32,6 +32,10 @@ maintainable as the project evolves.
 | [ADR-MCPS-017](adr-mcps-017.md) | Single-Node Production Claim Ceiling and Deferred Enterprise Capabilities |
 | [ADR-MCPS-018](adr-mcps-018.md) | CI Reproducibility Posture and Conformance-Manifest Authority |
 | [ADR-MCPS-019](adr-mcps-019.md) | Phase 7 External Backends (stub — published here for the first time) |
+| [ADR-MCPS-020](adr-mcps-020.md) | Distributed Atomic Replay Store — Durability Contract for Horizontally-Scaled Replay Safety (v0.3 sketch) |
+| [ADR-MCPS-021](adr-mcps-021.md) | Cluster Trust State — Revocation and Rotation Propagation Across Nodes (v0.3 sketch) |
+| [ADR-MCPS-022](adr-mcps-022.md) | Signing Key Custody at Scale — Per-Node Keys, Explicit Anchor, Optional KMS (v0.3 sketch) |
+| [ADR-MCPS-023](adr-mcps-023.md) | Ingress and Reverse-Proxy mTLS — End-to-End Binding vs. Trusted-Ingress Re-Assertion (v0.3 sketch) |
 
 ## Provenance
 
