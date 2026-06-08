@@ -937,6 +937,22 @@ pub fn strict_violations(config: &Config) -> Vec<String> {
                 .to_string(),
         );
     }
+    // ADR-MCPS-020: under strict/production a shared replay store must declare a
+    // durability tier of REDIS_WAIT_QUORUM or stronger. REDIS_ASYNC carries a
+    // bounded-but-real failover replay window, and SINGLE_STORE_FAIL_CLOSED is a
+    // single point of availability failure — both are rejected (not just warned)
+    // so production cannot silently run on the weaker replay-safety claim.
+    if config.replay == ReplayKind::Shared {
+        if let Some(tier) = &config.replay_durability_tier {
+            if !tier.meets_strict_production_minimum() {
+                violations.push(format!(
+                    "--replay-durability-tier {} is weaker than the strict-production minimum; \
+                     declare redis-wait-quorum:<quorum>:<timeout_ms> or a linearizable tier",
+                    tier.wire_name()
+                ));
+            }
+        }
+    }
     // #4082 (M09): a DELIBERATE `--inner-sandbox off` asks for zero inner
     // containment against a potentially hostile inner server. Only the EXPLICIT
     // form is rejected — the (identical-valued) default is left a warning because
@@ -3166,6 +3182,53 @@ mod tests {
         assert!(
             strict_violations(&config).is_empty(),
             "a safe config must have no strict violations"
+        );
+    }
+
+    // ADR-MCPS-020: strict/production rejects a shared store declared at a tier
+    // weaker than REDIS_WAIT_QUORUM.
+    #[test]
+    fn strict_rejects_weak_replay_durability_tier() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--strict",
+                "--replay-cache",
+                "shared",
+                "--replay-redis-url",
+                "redis://127.0.0.1:6379",
+                "--replay-durability-tier",
+                "redis-async",
+            ]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(err.contains("--strict"), "got: {err}");
+        assert!(err.contains("--replay-durability-tier"), "got: {err}");
+        assert!(err.contains("strict-production minimum"), "got: {err}");
+    }
+
+    #[test]
+    fn strict_accepts_wait_quorum_replay_durability_tier() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--strict",
+                "--replay-cache",
+                "shared",
+                "--replay-redis-url",
+                "redis://127.0.0.1:6379",
+                "--replay-durability-tier",
+                "redis-wait-quorum:2:500",
+            ]),
+        );
+        let config = parse_args(&a).expect("wait-quorum tier must be strict-acceptable");
+        assert!(
+            strict_violations(&config)
+                .iter()
+                .all(|v| !v.contains("replay-durability-tier")),
+            "wait-quorum must not be a replay-tier strict violation"
         );
     }
 
