@@ -36,6 +36,9 @@ maintainable as the project evolves.
 | [ADR-MCPS-021](adr-mcps-021.md) | Cluster Trust State — Revocation and Rotation Propagation Across Nodes (v0.3 sketch) |
 | [ADR-MCPS-022](adr-mcps-022.md) | Signing Key Custody at Scale — Per-Node Keys, Explicit Anchor, Optional KMS (v0.3 sketch) |
 | [ADR-MCPS-023](adr-mcps-023.md) | Ingress and Reverse-Proxy mTLS — End-to-End Binding vs. Trusted-Ingress Re-Assertion (v0.3 sketch) |
+| [ADR-MCPS-024](adr-mcps-024.md) | Replay Safety Under MCP Multi Round-Trip Requests (SEP-2322) — v0.3 RC delta |
+| [ADR-MCPS-025](adr-mcps-025.md) | Untrusted Transport Routing Headers — MCP-S Composition with SEP-2243 — v0.3 RC delta |
+| [ADR-MCPS-026](adr-mcps-026.md) | Signing Scope Versus Stateless Per-Request `_meta` (SEP-2575) — v0.3 RC delta |
 
 ## Provenance
 
