@@ -66,6 +66,64 @@ pub enum ReplayDurabilityTier {
 }
 
 impl ReplayDurabilityTier {
+    /// Parse an operator-supplied `--replay-durability-tier` value into a tier.
+    ///
+    /// Accepted forms (case-insensitive):
+    /// - `redis-async`
+    /// - `redis-wait-quorum:<quorum>:<timeout_ms>` (e.g. `redis-wait-quorum:2:500`)
+    /// - `linearizable`
+    /// - `single-store-fail-closed`
+    ///
+    /// Returns a human-readable error string (no panics) so the CLI can fail
+    /// closed with a precise message.
+    pub fn parse(value: &str) -> Result<ReplayDurabilityTier, String> {
+        let lower = value.trim().to_lowercase();
+        match lower.as_str() {
+            "redis-async" => Ok(ReplayDurabilityTier::RedisAsyncBounded),
+            "linearizable" => Ok(ReplayDurabilityTier::Linearizable),
+            "single-store-fail-closed" => Ok(ReplayDurabilityTier::SingleStoreFailClosed),
+            other => {
+                let rest = other.strip_prefix("redis-wait-quorum").ok_or_else(|| {
+                    format!(
+                        "unknown replay durability tier '{value}' (expected redis-async | \
+                         redis-wait-quorum:<quorum>:<timeout_ms> | linearizable | \
+                         single-store-fail-closed)"
+                    )
+                })?;
+                let mut parts = rest.split(':');
+                // After the prefix the first split element is the empty string
+                // before the first ':'.
+                if parts.next() != Some("") {
+                    return Err(format!(
+                        "redis-wait-quorum requires ':<quorum>:<timeout_ms>' (got '{value}')"
+                    ));
+                }
+                let quorum = parts
+                    .next()
+                    .and_then(|q| q.parse::<u32>().ok())
+                    .filter(|q| *q >= 1)
+                    .ok_or_else(|| {
+                        format!("redis-wait-quorum quorum must be a positive integer (in '{value}')")
+                    })?;
+                let timeout_ms = parts
+                    .next()
+                    .and_then(|t| t.parse::<u64>().ok())
+                    .filter(|t| *t >= 1)
+                    .ok_or_else(|| {
+                        format!(
+                            "redis-wait-quorum timeout_ms must be a positive integer (in '{value}')"
+                        )
+                    })?;
+                if parts.next().is_some() {
+                    return Err(format!(
+                        "redis-wait-quorum takes exactly ':<quorum>:<timeout_ms>' (got '{value}')"
+                    ));
+                }
+                Ok(ReplayDurabilityTier::RedisWaitQuorum { quorum, timeout_ms })
+            }
+        }
+    }
+
     /// The semantic wire name operators quote (ADR-MCPS-020). Stable, uppercase,
     /// backend-agnostic — used in config, startup logs, and audit records.
     pub fn wire_name(&self) -> &'static str {
@@ -148,6 +206,43 @@ mod tests {
             ReplayDurabilityTier::Linearizable,
             ReplayDurabilityTier::SingleStoreFailClosed,
         ]
+    }
+
+    #[test]
+    fn parse_round_trips_the_simple_tiers() {
+        assert_eq!(
+            ReplayDurabilityTier::parse("redis-async"),
+            Ok(ReplayDurabilityTier::RedisAsyncBounded)
+        );
+        assert_eq!(
+            ReplayDurabilityTier::parse("LINEARIZABLE"),
+            Ok(ReplayDurabilityTier::Linearizable)
+        );
+        assert_eq!(
+            ReplayDurabilityTier::parse("  single-store-fail-closed  "),
+            Ok(ReplayDurabilityTier::SingleStoreFailClosed)
+        );
+    }
+
+    #[test]
+    fn parse_wait_quorum_extracts_quorum_and_timeout() {
+        assert_eq!(
+            ReplayDurabilityTier::parse("redis-wait-quorum:2:500"),
+            Ok(ReplayDurabilityTier::RedisWaitQuorum {
+                quorum: 2,
+                timeout_ms: 500
+            })
+        );
+    }
+
+    #[test]
+    fn parse_rejects_unknown_and_malformed() {
+        assert!(ReplayDurabilityTier::parse("cluster").is_err());
+        assert!(ReplayDurabilityTier::parse("redis-wait-quorum").is_err());
+        assert!(ReplayDurabilityTier::parse("redis-wait-quorum:0:500").is_err());
+        assert!(ReplayDurabilityTier::parse("redis-wait-quorum:2:0").is_err());
+        assert!(ReplayDurabilityTier::parse("redis-wait-quorum:2:500:9").is_err());
+        assert!(ReplayDurabilityTier::parse("redis-wait-quorum:two:500").is_err());
     }
 
     #[test]

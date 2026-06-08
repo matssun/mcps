@@ -171,6 +171,11 @@ pub struct Config {
     /// Shared replay-store connection URL (required when `replay == Shared`),
     /// e.g. `redis://127.0.0.1:6379` (issue #3837).
     pub replay_redis_url: Option<String>,
+    /// Declared replay-store durability tier (ADR-MCPS-020). Required when
+    /// `replay == Shared` — the tier is an explicit deployment assertion that
+    /// determines the horizontal replay-safety claim. `None` for single-node
+    /// `Memory` / `File` backends.
+    pub replay_durability_tier: Option<crate::replay_tier::ReplayDurabilityTier>,
     /// Transport-binding selection.
     pub binding: BindingKind,
     /// The authoritative identity field (no implicit fallback). For the default
@@ -273,6 +278,7 @@ const KNOWN_PROXY_FLAGS: &[&str] = &[
     "--replay-cache",
     "--replay-path",
     "--replay-redis-url",
+    "--replay-durability-tier",
     "--transport-binding",
     "--transport-identity-source",
     "--reverse-proxy-identity-header",
@@ -331,6 +337,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut replay = ReplayKind::Memory;
     let mut replay_path = None;
     let mut replay_redis_url = None;
+    let mut replay_durability_tier: Option<crate::replay_tier::ReplayDurabilityTier> = None;
     let mut binding = BindingKind::Exact;
     let mut identity_source = IdentityPolicy::UriSan;
     let mut reverse_proxy_identity_header: Option<String> = None;
@@ -484,6 +491,10 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             }
             "--replay-path" => replay_path = Some(value.clone()),
             "--replay-redis-url" => replay_redis_url = Some(value.clone()),
+            "--replay-durability-tier" => {
+                replay_durability_tier =
+                    Some(crate::replay_tier::ReplayDurabilityTier::parse(value)?)
+            }
             "--transport-binding" => {
                 binding = match value.as_str() {
                     "none" => BindingKind::None,
@@ -699,6 +710,15 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     if replay == ReplayKind::Shared && replay_redis_url.is_none() {
         return Err("--replay-cache shared requires --replay-redis-url".to_string());
     }
+    // ADR-MCPS-020: the durability tier is an explicit deployment assertion that
+    // determines the horizontal replay-safety claim, so a shared store MUST
+    // declare it (fail closed rather than assume a tier).
+    if replay == ReplayKind::Shared && replay_durability_tier.is_none() {
+        return Err("--replay-cache shared requires --replay-durability-tier \
+                    (redis-async | redis-wait-quorum:<quorum>:<timeout_ms> | linearizable | \
+                    single-store-fail-closed)"
+            .to_string());
+    }
     // EnvKeySource is dev/CI-only: refuse env key material unless explicitly
     // opted in. Environment variables are visible to the process tree and may
     // leak via crash dumps / `ps e` / orchestrator inspection.
@@ -817,6 +837,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         replay,
         replay_path,
         replay_redis_url,
+        replay_durability_tier,
         binding,
         identity_source,
         reverse_proxy_identity_header,
@@ -2673,13 +2694,24 @@ mod tests {
         let mut a = minimal();
         a.splice(
             0..0,
-            args(&["--replay-cache", "shared", "--replay-redis-url", "redis://127.0.0.1:6379"]),
+            args(&[
+                "--replay-cache",
+                "shared",
+                "--replay-redis-url",
+                "redis://127.0.0.1:6379",
+                "--replay-durability-tier",
+                "redis-async",
+            ]),
         );
         let config = parse_args(&a).expect("parse");
         assert_eq!(config.replay, ReplayKind::Shared);
         assert_eq!(
             config.replay_redis_url.as_deref(),
             Some("redis://127.0.0.1:6379")
+        );
+        assert_eq!(
+            config.replay_durability_tier,
+            Some(crate::replay_tier::ReplayDurabilityTier::RedisAsyncBounded)
         );
     }
 
@@ -2689,6 +2721,60 @@ mod tests {
         a.splice(0..0, args(&["--replay-cache", "shared"]));
         let err = parse_args(&a).unwrap_err();
         assert!(err.contains("--replay-redis-url"), "got: {err}");
+    }
+
+    // ADR-MCPS-020: a shared store must declare its durability tier.
+    #[test]
+    fn shared_replay_requires_durability_tier() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&["--replay-cache", "shared", "--replay-redis-url", "redis://127.0.0.1:6379"]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(err.contains("--replay-durability-tier"), "got: {err}");
+    }
+
+    #[test]
+    fn parses_wait_quorum_durability_tier() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--replay-cache",
+                "shared",
+                "--replay-redis-url",
+                "redis://127.0.0.1:6379",
+                "--replay-durability-tier",
+                "redis-wait-quorum:2:500",
+            ]),
+        );
+        let config = parse_args(&a).expect("parse");
+        assert_eq!(
+            config.replay_durability_tier,
+            Some(crate::replay_tier::ReplayDurabilityTier::RedisWaitQuorum {
+                quorum: 2,
+                timeout_ms: 500
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_durability_tier() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--replay-cache",
+                "shared",
+                "--replay-redis-url",
+                "redis://127.0.0.1:6379",
+                "--replay-durability-tier",
+                "cluster",
+            ]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(err.contains("unknown replay durability tier"), "got: {err}");
     }
 
     #[test]
