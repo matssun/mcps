@@ -131,6 +131,8 @@ pub use tls::RustlsDirectProvider;
 pub use tls::ServerLimits;
 pub use tls::ServerOptions;
 pub use tls::TlsError;
+pub use transport::validate_asserted_identity_value;
+pub use transport::AssertedIdentityRejection;
 pub use transport::ExactMatchBinding;
 pub use transport::IdentityPolicy;
 pub use transport::IdentitySource;

@@ -177,6 +177,46 @@ impl TransportBindingProvider for StaticIdentityProvider {
 }
 
 /// A [`TransportBindingProvider`] that reads the verified client identity from a
+/// Maximum accepted length (bytes) of an asserted trusted-ingress identity value
+/// (ADR-MCPS-023: asserted-identity metadata MUST be length-bounded — oversized
+/// values fail closed). Generous enough for SPIFFE URIs / RFC2253 DNs, small
+/// enough to bound parse/log cost and reject smuggling payloads.
+pub const MAX_ASSERTED_IDENTITY_LEN: usize = 8192;
+
+/// Why a trusted-ingress asserted-identity value was rejected (ADR-MCPS-023).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertedIdentityRejection {
+    /// Empty after trimming.
+    Empty,
+    /// Longer than [`MAX_ASSERTED_IDENTITY_LEN`].
+    TooLong,
+    /// Contains a control character (CR / LF / NUL / …) — a header-smuggling and
+    /// log-injection risk; a well-formed identity value has none.
+    Malformed,
+}
+
+/// Validate a single asserted trusted-ingress identity value against the
+/// ADR-MCPS-023 strict rules: **well-formed** (no control characters),
+/// **length-bounded** ([`MAX_ASSERTED_IDENTITY_LEN`]), and non-empty. Returns the
+/// trimmed value on success, or the reason it fails closed.
+///
+/// The **single-valued** rule is enforced by the caller via
+/// [`RequestHeaders::count`] (a duplicated trust header fails closed before the
+/// value is ever read); this function validates the lone value's shape.
+pub fn validate_asserted_identity_value(value: &str) -> Result<&str, AssertedIdentityRejection> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AssertedIdentityRejection::Empty);
+    }
+    if trimmed.len() > MAX_ASSERTED_IDENTITY_LEN {
+        return Err(AssertedIdentityRejection::TooLong);
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(AssertedIdentityRejection::Malformed);
+    }
+    Ok(trimmed)
+}
+
 /// TRUSTED header set by an upstream mTLS-terminating reverse proxy (e.g. Envoy /
 /// nginx forwarding `X-Forwarded-Client-Cert`). This lets MCP-S run behind
 /// enterprise ingress that already terminates mTLS, instead of terminating mTLS
@@ -255,14 +295,13 @@ impl ReverseProxyMtlsProvider {
         }
     }
 
-    /// Parse a PLAIN identity header value into an identity, or `None`. A value
-    /// that is empty after trimming fails closed.
+    /// Parse a PLAIN identity header value into an identity, or `None`. The value
+    /// must satisfy the ADR-MCPS-023 strict rules
+    /// ([`validate_asserted_identity_value`]): non-empty, length-bounded, and
+    /// well-formed (no control characters). Any violation fails closed (`None`).
     fn parse_plain(&self, value: &str) -> Option<TransportIdentity> {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        Some(TransportIdentity::new(trimmed.to_string(), self.source()))
+        let validated = validate_asserted_identity_value(value).ok()?;
+        Some(TransportIdentity::new(validated.to_string(), self.source()))
     }
 
     /// Parse an Envoy XFCC header value, extracting the field named by the policy.
@@ -987,6 +1026,66 @@ mod tests {
             policy.check("DID:EXAMPLE:AGENT-1", Some(&ok)).unwrap_err(),
             McpsError::TransportBindingFailed,
             "signer match is case-sensitive"
+        );
+    }
+
+    // ADR-MCPS-023: strict asserted-identity header validation.
+    #[test]
+    fn asserted_identity_accepts_a_well_formed_value_and_trims() {
+        assert_eq!(
+            super::validate_asserted_identity_value("  spiffe://example.org/agent-1  "),
+            Ok("spiffe://example.org/agent-1")
+        );
+    }
+
+    #[test]
+    fn asserted_identity_rejects_empty() {
+        assert_eq!(
+            super::validate_asserted_identity_value("   "),
+            Err(super::AssertedIdentityRejection::Empty)
+        );
+    }
+
+    #[test]
+    fn asserted_identity_rejects_oversized() {
+        let huge = "a".repeat(super::MAX_ASSERTED_IDENTITY_LEN + 1);
+        assert_eq!(
+            super::validate_asserted_identity_value(&huge),
+            Err(super::AssertedIdentityRejection::TooLong)
+        );
+        // Exactly at the bound is accepted.
+        let at_bound = "a".repeat(super::MAX_ASSERTED_IDENTITY_LEN);
+        assert!(super::validate_asserted_identity_value(&at_bound).is_ok());
+    }
+
+    #[test]
+    fn asserted_identity_rejects_control_characters() {
+        // CR/LF (header smuggling / log injection), NUL, and a bare control char.
+        for bad in ["agent\r\nX-Spoof: y", "agent\nid", "agent\0id", "ag\u{7}ent"] {
+            assert_eq!(
+                super::validate_asserted_identity_value(bad),
+                Err(super::AssertedIdentityRejection::Malformed),
+                "control characters must fail closed: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reverse_proxy_plain_provider_fails_closed_on_malformed_value() {
+        // The provider's plain path now enforces the ADR-023 rules: a CRLF-laced
+        // value yields no identity (fail closed), not a smuggled one.
+        let provider = super::ReverseProxyMtlsProvider::new(
+            "x-client-identity",
+            super::ReverseProxyHeaderFormat::Plain,
+            super::IdentityPolicy::UriSan,
+        );
+        let headers = super::RequestHeaders::from_pairs([(
+            "x-client-identity",
+            "spiffe://example.org/a\r\nX-Spoof: evil",
+        )]);
+        assert!(
+            super::TransportBindingProvider::verified_identity(&provider, &headers).is_none(),
+            "a control-char-laced plain identity header must fail closed"
         );
     }
 }
