@@ -39,6 +39,37 @@ use mcps_core::TrustResolver;
 use mcps_core::TrustResolverError;
 use mcps_core::VerificationKey;
 
+/// The maximum recommended trust-propagation window (seconds). ADR-MCPS-021 warns
+/// when a configured `T` exceeds 5 minutes (a long revocation exposure window);
+/// strict/production mode MAY cap `T` at this value unless explicitly overridden.
+pub const RECOMMENDED_MAX_T_SECS: i64 = 300;
+
+/// The deployment-wide default trust-propagation window (seconds), ADR-MCPS-021.
+pub const DEFAULT_T_SECS: i64 = 60;
+
+/// Whether a configured `T` exceeds the recommended maximum (→ the proxy warns;
+/// strict mode MAY cap). A non-positive `T` (live-check / no caching) never warns.
+pub fn t_exceeds_recommended_max(t_secs: i64) -> bool {
+    t_secs > RECOMMENDED_MAX_T_SECS
+}
+
+/// Select the **strictest applicable** trust-propagation window (ADR-MCPS-021:
+/// "a request MUST use the strictest applicable `T`").
+///
+/// Starts from the global `default_t_secs` and takes the minimum over any stricter
+/// per-sensitivity-class windows that apply to the request (admin, financial
+/// mutation, production infra, high-risk tools). Negative class windows are
+/// ignored (malformed config never widens the window); the default is clamped to
+/// non-negative. The result is the smallest — i.e. the tightest revocation
+/// exposure — of the applicable windows.
+pub fn strictest_applicable_t(default_t_secs: i64, class_windows: &[i64]) -> i64 {
+    class_windows
+        .iter()
+        .copied()
+        .filter(|t| *t >= 0)
+        .fold(default_t_secs.max(0), |acc, t| acc.min(t))
+}
+
 /// A source of the CURRENT Unix time (seconds). The proxy's impure edge — the
 /// pure `TrustResolver` trait carries no clock, so the cache owns one to bound the
 /// propagation window `T`. Production injects [`system_clock`]; tests inject a
@@ -464,6 +495,31 @@ mod tests {
             cache.resolve("did:host", "key-1"),
             Err(TrustResolverError::Unavailable { .. })
         ));
+    }
+
+    #[test]
+    fn strictest_applicable_t_picks_the_tightest_window() {
+        use super::strictest_applicable_t;
+        // No class overrides → the global default.
+        assert_eq!(strictest_applicable_t(60, &[]), 60);
+        // A stricter class window wins (smaller = tighter exposure).
+        assert_eq!(strictest_applicable_t(60, &[10]), 10);
+        // The strictest of several applicable classes wins.
+        assert_eq!(strictest_applicable_t(60, &[30, 5, 45]), 5);
+        // A looser class window never widens past the default.
+        assert_eq!(strictest_applicable_t(60, &[120]), 60);
+        // Negative (malformed) class windows are ignored, not treated as 0.
+        assert_eq!(strictest_applicable_t(60, &[-1, 20]), 20);
+    }
+
+    #[test]
+    fn t_exceeds_recommended_max_flags_long_windows() {
+        use super::t_exceeds_recommended_max;
+        use super::RECOMMENDED_MAX_T_SECS;
+        assert!(!t_exceeds_recommended_max(RECOMMENDED_MAX_T_SECS));
+        assert!(t_exceeds_recommended_max(RECOMMENDED_MAX_T_SECS + 1));
+        assert!(!t_exceeds_recommended_max(0), "no caching never warns");
+        assert!(!t_exceeds_recommended_max(super::DEFAULT_T_SECS));
     }
 
     #[test]
