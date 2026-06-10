@@ -66,6 +66,10 @@ pub mod proxy;
 // unchanged.
 #[cfg(feature = "redis_replay")]
 pub mod redis_store;
+// ADR-MCPS-020: the declared replay-store durability tier (deployment assertion,
+// semantic names, honest per-tier guarantee, tier-claim ceiling). Pure type — in
+// the default build.
+pub mod replay_tier;
 pub mod rlimits;
 // Issue #3865: OS sandbox PROFILE + fail-closed platform gate for inner-server
 // fs/network containment (the config, CLI, seam, and fail-closed gate).
@@ -115,6 +119,7 @@ pub use proxy::Proxy;
 // Issue #4028: the Redis shared replay backend (feature-gated).
 #[cfg(feature = "redis_replay")]
 pub use redis_store::RedisAtomicReplayStore;
+pub use replay_tier::ReplayDurabilityTier;
 pub use rlimits::RLimits;
 pub use sandbox::NetworkPolicy;
 pub use sandbox::SandboxMode;
