@@ -55,8 +55,8 @@ const RESPONSE_ISSUED_AT: &str = "2026-05-28T20:00:01Z";
 const NONCE: &str = "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA";
 const AUTHORIZATION_HASH: &str = "sha256:RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o";
 
-const REQUEST_META_KEY: &str = "name.sundvall/mcps-security.request";
-const RESPONSE_META_KEY: &str = "name.sundvall/mcps-security.response";
+const REQUEST_META_KEY: &str = "se.syncom/mcps.request";
+const RESPONSE_META_KEY: &str = "se.syncom/mcps.response";
 
 fn signer_key() -> SigningKey {
     SigningKey::from_seed_bytes(&SIGNER_SEED)

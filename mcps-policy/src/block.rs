@@ -1,4 +1,4 @@
-//! The `name.sundvall/mcps-security.authorization` sibling `_meta` block
+//! The `se.syncom/mcps.authorization` sibling `_meta` block
 //! (ADR-MCPS-013).
 //!
 //! The block travels alongside the Core request envelope under
@@ -17,13 +17,13 @@ use crate::error::PolicyError;
 /// in `mcps-core`) so Core stays byte-for-byte unchanged; it is never part of any
 /// signed preimage. Kept consistent with the Core extension identifier — see the
 /// test asserting `AUTHORIZATION_META_KEY == "{EXTENSION_ID}.authorization"`.
-pub const AUTHORIZATION_META_KEY: &str = "name.sundvall/mcps-security.authorization";
+pub const AUTHORIZATION_META_KEY: &str = "se.syncom/mcps.authorization";
 
 /// The parsed authorization block: a profile selector plus the raw artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizationBlock {
     /// The profile identifier that interprets `artifact` (e.g.
-    /// `name.sundvall/mcps-authz-reference-v1`).
+    /// `se.syncom/mcps-authz-reference-v1`).
     pub profile: String,
     /// The artifact as a Base64URL-no-pad string (decode via
     /// [`AuthorizationBlock::decoded_artifact`]).
@@ -104,11 +104,11 @@ mod tests {
     fn extracts_a_well_formed_block_and_decodes_the_artifact() {
         let bytes = b"the-artifact-bytes";
         let req = request_with_block(json!({
-            "profile": "name.sundvall/mcps-authz-reference-v1",
+            "profile": "se.syncom/mcps-authz-reference-v1",
             "artifact": b64url_encode(bytes),
         }));
         let block = extract_authorization_block(&req).expect("extract");
-        assert_eq!(block.profile, "name.sundvall/mcps-authz-reference-v1");
+        assert_eq!(block.profile, "se.syncom/mcps-authz-reference-v1");
         assert_eq!(block.decoded_artifact().expect("decode"), bytes);
     }
 

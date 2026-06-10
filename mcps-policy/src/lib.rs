@@ -7,7 +7,7 @@
 //! the Core error taxonomy.
 //!
 //! The artifact travels in a sibling `_meta` block,
-//! `name.sundvall/mcps-security.authorization = { profile, artifact }`, bound to
+//! `se.syncom/mcps.authorization = { profile, artifact }`, bound to
 //! the request because `authorization_hash == sha256(decoded artifact bytes)`.
 //!
 //! MCPS-019 lands the abstraction: the [`AuthorizationProfile`] trait, the

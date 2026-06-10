@@ -12,7 +12,7 @@ Derived from PRD; depends on ADR-MCPS-003. A sidecar can verify MCP-S at the bou
 
 ## Decision
 
-A sidecar propagates verified request context to an inner MCP server by injecting an in-band `_meta` block under `name.sundvall/mcps-security.verified` (carrying `verified_signer`, `key_id`, `on_behalf_of`, `audience`, `authorization_hash`, `request_hash`, `verifier`, `verified_at`); the sidecar MUST strip any caller-supplied verified-context key regardless of inbound signature validity and be its sole writer, strips the external `*.request` envelope from the forwarded message by default, leaves the block unsigned (trust derives from the private local channel), and treats it as a local-boundary artifact that is never a portable credential.
+A sidecar propagates verified request context to an inner MCP server by injecting an in-band `_meta` block under `se.syncom/mcps.verified` (carrying `verified_signer`, `key_id`, `on_behalf_of`, `audience`, `authorization_hash`, `request_hash`, `verifier`, `verified_at`); the sidecar MUST strip any caller-supplied verified-context key regardless of inbound signature validity and be its sole writer, strips the external `*.request` envelope from the forwarded message by default, leaves the block unsigned (trust derives from the private local channel), and treats it as a local-boundary artifact that is never a portable credential.
 
 ## Rationale
 

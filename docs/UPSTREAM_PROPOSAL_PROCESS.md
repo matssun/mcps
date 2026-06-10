@@ -25,7 +25,7 @@ MCP-S is currently an experimental third-party extension proposal. It should not
 Incubation identifier:
 
 ```text
-name.sundvall/mcps-security
+se.syncom/mcps
 ```
 
 Do not use official MCP-controlled identifiers unless accepted.

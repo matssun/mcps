@@ -133,7 +133,7 @@ mod tests {
                 "name": "echo",
                 "arguments": { "text": "hello" },
                 "_meta": {
-                    "name.sundvall/mcps-security.request": {
+                    "se.syncom/mcps.request": {
                         "version": "draft-01",
                         "signer": "did:example:host",
                         "on_behalf_of": "user:alice",
@@ -160,7 +160,7 @@ mod tests {
             "result": {
                 "content": [{ "type": "text", "text": "hello" }],
                 "_meta": {
-                    "name.sundvall/mcps-security.response": {
+                    "se.syncom/mcps.response": {
                         "request_hash": "sha256:BBBB",
                         "server_signer": "did:example:server",
                         "issued_at": "2026-05-28T20:00:01Z",
@@ -188,7 +188,7 @@ mod tests {
     fn preimage_equals_canonicalize_of_object_with_value_removed() {
         // Independently build the expected: same object, signature.value removed.
         let mut expected_obj = request_object();
-        expected_obj["params"]["_meta"]["name.sundvall/mcps-security.request"]["signature"]
+        expected_obj["params"]["_meta"]["se.syncom/mcps.request"]["signature"]
             .as_object_mut()
             .unwrap()
             .remove("value");
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn missing_signature_block_errors() {
         let mut obj = request_object();
-        obj["params"]["_meta"]["name.sundvall/mcps-security.request"]
+        obj["params"]["_meta"]["se.syncom/mcps.request"]
             .as_object_mut()
             .unwrap()
             .remove("signature");
@@ -252,7 +252,7 @@ mod tests {
         // must NOT change the request_hash.
         let baseline = request_hash(&request_object()).expect("hash");
         let mut other_value = request_object();
-        other_value["params"]["_meta"]["name.sundvall/mcps-security.request"]["signature"]
+        other_value["params"]["_meta"]["se.syncom/mcps.request"]["signature"]
             ["value"] = Value::String("ZGlmZmVyZW50".to_string());
         assert_eq!(baseline, request_hash(&other_value).expect("hash"));
     }

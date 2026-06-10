@@ -273,7 +273,7 @@ mod tests {
             "jsonrpc": "2.0",
             "method": "tools/call",
             "params": {
-                "_meta": {"name.sundvall/mcps-security.request": envelope},
+                "_meta": {"se.syncom/mcps.request": envelope},
                 "arguments": {"text": "hello"},
                 "name": "echo"
             }
@@ -295,7 +295,7 @@ mod tests {
             "id": "req-1",
             "jsonrpc": "2.0",
             "result": {
-                "_meta": {"name.sundvall/mcps-security.response": envelope},
+                "_meta": {"se.syncom/mcps.response": envelope},
                 "content": []
             }
         })

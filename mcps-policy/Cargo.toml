@@ -17,3 +17,15 @@ thiserror = { workspace = true }
 [lib]
 name = "mcps_policy"
 path = "src/lib.rs"
+
+[dev-dependencies]
+# Used only by the gen_phase5_vectors example to mint host-signed request
+# vectors. mcps-host depends only on mcps-core, so no dependency cycle.
+mcps-host = { path = "../mcps-host" }
+
+# Cargo entry point for the Phase 5 conformance-vector generator (the monorepo
+# drives the same source via Bazel: //components/mcps/mcps-policy:gen_phase5_vectors).
+# Run: cargo run -p mcps-policy --example gen_phase5_vectors > tests/vectors/phase5_vectors.json
+[[example]]
+name = "gen_phase5_vectors"
+path = "conformance/gen_vectors.rs"

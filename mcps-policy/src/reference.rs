@@ -1,6 +1,6 @@
 //! The Reference Signed Authorization Profile (MCPS-020, ADR-MCPS-013).
 //!
-//! Profile id `name.sundvall/mcps-authz-reference-v1`. This is a native,
+//! Profile id `se.syncom/mcps-authz-reference-v1`. This is a native,
 //! in-house, deterministic profile whose ONLY purpose is to prove the
 //! [`AuthorizationProfile`] interface and produce reproducible conformance
 //! vectors. It is explicitly NOT the long-term recommendation — Biscuit is the
@@ -43,7 +43,7 @@ use crate::revocation::RevocationSource;
 use crate::revocation::RevocationStatus;
 
 /// The Reference Signed Authorization Profile identifier.
-pub const REFERENCE_PROFILE_ID: &str = "name.sundvall/mcps-authz-reference-v1";
+pub const REFERENCE_PROFILE_ID: &str = "se.syncom/mcps-authz-reference-v1";
 
 /// One granted operation: a method + tool/resource name, with optional argument
 /// constraints (each constrained key must equal the request's argument value).

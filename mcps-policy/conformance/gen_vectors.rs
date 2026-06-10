@@ -202,7 +202,7 @@ fn main() {
     // 3. authorization_profile_unsupported — unknown profile id in the block.
     {
         let artifact = mint_reference_grant(&base_spec(), &issuer_key(), ISSUER_KEY_ID).unwrap();
-        let block = authorization_block("name.sundvall/mcps-authz-biscuit-v1", &artifact);
+        let block = authorization_block("se.syncom/mcps-authz-biscuit-v1", &artifact);
         let req = signed_request("nonce-unsupp-001", "echo", echo_args.clone(), Some(block), &hash_of(&artifact));
         vectors.push(vector(
             "authorization_profile_unsupported",

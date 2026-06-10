@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn unknown_profile_is_unsupported() {
         let artifact = mint_reference_grant(&spec(), &issuer_key(), ISSUER_KEY_ID).unwrap();
-        let (request, verified) = request_and_verified(&artifact, "name.sundvall/mcps-authz-biscuit-v1");
+        let (request, verified) = request_and_verified(&artifact, "se.syncom/mcps-authz-biscuit-v1");
         let decision = evaluator().evaluate(
             &verified,
             &request,

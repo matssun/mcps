@@ -120,7 +120,7 @@ mod tests {
     use serde_json::json;
 
     fn signed_meta() -> serde_json::Value {
-        json!({ "name.sundvall/mcps-security.response": { "signature": { "alg": "Ed25519" } } })
+        json!({ "se.syncom/mcps.response": { "signature": { "alg": "Ed25519" } } })
     }
 
     #[test]

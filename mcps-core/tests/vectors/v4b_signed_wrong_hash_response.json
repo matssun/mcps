@@ -6,14 +6,14 @@
     "jsonrpc": "2.0",
     "result": {
       "_meta": {
-        "name.sundvall/mcps-security.response": {
+        "se.syncom/mcps.response": {
           "issued_at": "2026-05-28T20:00:01Z",
           "request_hash": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
           "server_signer": "did:example:server-1",
           "signature": {
             "alg": "Ed25519",
             "key_id": "server-key-1",
-            "value": "d_OVqD7jRA6UvWgAygs7XPev7rx9_7tHMN2OeA4PUo0ENt0QEYtW9264SAj9Fm0Q9OvIDmDCxTAhleyTU5YtCQ"
+            "value": "fG2nGU_vFNkp7JoJuaz8UOQqtnqQoPR-PnyUBi6r0IenKFzDk_4GbsSyKf9o5e_626ZqltAv8KPnSW35XJClBg"
           }
         }
       },

@@ -99,7 +99,7 @@ fn client_creates_a_signed_request_with_injected_clock_and_rng() {
         .expect("client signs");
 
     let value: Value = serde_json::from_slice(&bytes).expect("parse signed request");
-    let envelope = &value["params"]["_meta"]["name.sundvall/mcps-security.request"];
+    let envelope = &value["params"]["_meta"]["se.syncom/mcps.request"];
 
     // Freshness stamped from the injected clock + default 5-minute lifetime.
     assert_eq!(envelope["issued_at"], json!(ISSUED_AT));

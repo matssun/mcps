@@ -19,12 +19,12 @@ A design review (recorded in `documents/mcps/MCP-S followup.md`) reached a clear
 
 ## Decision
 
-Phase 5 introduces an `AuthorizationProfile` abstraction in the existing `mcps-policy` crate, plus exactly **one** native, in-house profile — the **Reference Signed Authorization Profile**, profile identifier `name.sundvall/mcps-authz-reference-v1`. No Biscuit/UCAN/OAuth dependency is taken in this phase.
+Phase 5 introduces an `AuthorizationProfile` abstraction in the existing `mcps-policy` crate, plus exactly **one** native, in-house profile — the **Reference Signed Authorization Profile**, profile identifier `se.syncom/mcps-authz-reference-v1`. No Biscuit/UCAN/OAuth dependency is taken in this phase.
 
 The authorization artifact is carried in a **new sibling `_meta` block** alongside the existing Core envelopes:
 
 ```
-name.sundvall/mcps-security.authorization = { "profile": "<profile-id>", "artifact": "<base64url-no-pad bytes>" }
+se.syncom/mcps.authorization = { "profile": "<profile-id>", "artifact": "<base64url-no-pad bytes>" }
 ```
 
 This block is **not part of the Core signed preimage**. It is bound to the request cryptographically and transitively: Core already signs `authorization_hash`, and Phase 5 defines
@@ -57,7 +57,7 @@ AuthorizationDecision = Allow | Deny(PolicyError)
 A single JSON object, canonicalized with the same RFC 8785/JCS rules and signed with the same Ed25519 rule as Core (signature over the canonical bytes with `signature.value` removed; issuer key resolved via `mcps_core::TrustResolver`):
 
 ```text
-profile        : "name.sundvall/mcps-authz-reference-v1"
+profile        : "se.syncom/mcps-authz-reference-v1"
 issuer         : string   (authority that granted the capability)
 grantee        : string   (the agent identity == request signer)
 subject        : string   (the party acted for == request on_behalf_of)

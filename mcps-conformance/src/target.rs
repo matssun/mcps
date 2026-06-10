@@ -200,7 +200,7 @@ pub fn now_unix_for_case(case: &VectorCase) -> Result<i64, String> {
         // No message (cannot happen for request kinds); evaluate at epoch.
         return Ok(0);
     };
-    let envelope = &message["params"]["_meta"]["name.sundvall/mcps-security.request"];
+    let envelope = &message["params"]["_meta"]["se.syncom/mcps.request"];
     let issued_at = envelope["issued_at"].as_str();
     let expires_at = envelope["expires_at"].as_str();
 

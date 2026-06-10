@@ -26,7 +26,7 @@ use crate::revocation::RevocationSource;
 /// injected [`RevocationSource`].
 pub trait AuthorizationProfile {
     /// The profile identifier carried in the authorization block's `profile`
-    /// field (e.g. `name.sundvall/mcps-authz-reference-v1`).
+    /// field (e.g. `se.syncom/mcps-authz-reference-v1`).
     fn profile_id(&self) -> &str;
 
     /// The `authorization_hash` this profile expects for `artifact_bytes`:

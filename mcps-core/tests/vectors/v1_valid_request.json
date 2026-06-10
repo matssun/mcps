@@ -7,7 +7,7 @@
     "method": "tools/call",
     "params": {
       "_meta": {
-        "name.sundvall/mcps-security.request": {
+        "se.syncom/mcps.request": {
           "audience": "did:example:server-1",
           "authorization_hash": "sha256:RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
           "expires_at": "2026-05-28T20:05:00Z",
@@ -17,7 +17,7 @@
           "signature": {
             "alg": "Ed25519",
             "key_id": "key-1",
-            "value": "ym-rRufDoMUZEs_63Dfk2P7LDiXez80v306zB3CenfsA7lQkhyP3TDykmucCI0Lm8HYurVPfhn7yzScEfiAWBw"
+            "value": "YfVzF8oc261RzdlpCExhe6QDV3Dvw_4afpW7B1AYwnvftViqpykjgDaWU8q1BVMOmyNAeR7ZZe8sRuadjDdbDw"
           },
           "signer": "did:example:agent-1",
           "version": "draft-01"

@@ -85,9 +85,9 @@ MCP-S rides inside the MCP `_meta` extension space under controlled keys
 ([ADR-MCPS-002](../adr/adr-mcps-002.md)):
 
 ```text
-name.sundvall/mcps-security.request     # signed request envelope
-name.sundvall/mcps-security.response    # signed response envelope
-name.sundvall/mcps-security.verified    # sidecar -> inner server only, NEVER signed
+se.syncom/mcps.request     # signed request envelope
+se.syncom/mcps.response    # signed response envelope
+se.syncom/mcps.verified    # sidecar -> inner server only, NEVER signed
 ```
 
 The request envelope carries `signer`, `on_behalf_of`, `audience`,
@@ -212,7 +212,7 @@ run it from a fresh clone.
 
 ## 5. Incubation status
 
-The extension identifier `name.sundvall/mcps-security` is an **INCUBATION
+The extension identifier `se.syncom/mcps` is an **INCUBATION
 identifier**, not a claim of official MCP adoption or endorsement
 ([ADR-MCPS-010](../adr/adr-mcps-010.md)). It is a
 controlled, explicitly **non-official** namespace chosen so MCP-S can be developed
@@ -284,7 +284,7 @@ a Granian plugin and does not depend on Granian.
 Review of this design is welcome **in-repo**. The feedback most valuable to the
 project, roughly in priority order:
 
-1. **Envelope key naming** — the `name.sundvall/mcps-security.{request,response,verified}`
+1. **Envelope key naming** — the `se.syncom/mcps.{request,response,verified}`
    `_meta` keys and the preimage-stability consequence of changing them
    ([Section 5](#5-incubation-status)). Is the incubation-namespace approach the
    right way to avoid squatting on an official identifier, and is the migration

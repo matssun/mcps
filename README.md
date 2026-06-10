@@ -107,7 +107,7 @@ implied for it.
 During incubation, MCP-S should use a controlled third-party identifier, for example:
 
 ```text
-name.sundvall/mcps-security
+se.syncom/mcps
 ```
 
 Do not use:

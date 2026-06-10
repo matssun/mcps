@@ -6,7 +6,7 @@
     "jsonrpc": "2.0",
     "result": {
       "_meta": {
-        "name.sundvall/mcps-security.response": {
+        "se.syncom/mcps.response": {
           "issued_at": "2026-05-28T20:00:01Z",
           "request_hash": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
           "server_signer": "did:example:server-1",

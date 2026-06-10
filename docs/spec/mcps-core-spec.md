@@ -40,10 +40,10 @@ Cites: [ADR-MCPS-002](../adr/adr-mcps-002.md), [ADR-MCPS-010](../adr/adr-mcps-01
 
 These strings are part of the signed preimage; the rationale for treating them as preimage-stable and explicitly non-official lives in ADR-MCPS-010.
 
-- Extension identifier: `name.sundvall/mcps-security` (controlled, explicitly NON-official).
-- Request `_meta` key: `name.sundvall/mcps-security.request`
-- Response `_meta` key: `name.sundvall/mcps-security.response`
-- Verified-context `_meta` key (sidecar→inner only, never signed): `name.sundvall/mcps-security.verified`
+- Extension identifier: `se.syncom/mcps` (controlled, explicitly NON-official).
+- Request `_meta` key: `se.syncom/mcps.request`
+- Response `_meta` key: `se.syncom/mcps.response`
+- Verified-context `_meta` key (sidecar→inner only, never signed): `se.syncom/mcps.verified`
 - Envelope `version` field value: `"draft-01"`. Any other → `mcps.unsupported_version`.
 
 These strings live inside the signed `_meta` keys, so changing them changes the preimage. They are defined ONCE as constants in `mcps-core` (`mcps_core::ids`) and referenced everywhere. No string literals are scattered in code.

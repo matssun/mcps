@@ -4,7 +4,13 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-MCPS-027 — the incubation extension identifier was reassigned
+from `name.sundvall/mcps-security` to `se.syncom/mcps` (and the authorization
+profile IDs from `name.sundvall/mcps-authz-*` to `se.syncom/mcps-authz-*`). The
+original decision is preserved below as the historical record; the reassignment
+rationale, full identifier mapping, and the preimage/vector-regeneration
+consequence live in ADR-MCPS-027. The incubation strategy and preimage-stability
+rule themselves remain in force.
 
 ## Context
 

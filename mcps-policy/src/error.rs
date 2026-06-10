@@ -15,7 +15,7 @@
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
     /// The request verified at the Core layer but carries no
-    /// `name.sundvall/mcps-security.authorization` sibling block.
+    /// `se.syncom/mcps.authorization` sibling block.
     #[error("mcps.authorization_block_missing")]
     AuthorizationBlockMissing,
 

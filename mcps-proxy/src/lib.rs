@@ -66,6 +66,10 @@ pub mod proxy;
 // unchanged.
 #[cfg(feature = "redis_replay")]
 pub mod redis_store;
+// ADR-MCPS-020: the declared replay-store durability tier (deployment assertion,
+// semantic names, honest per-tier guarantee, tier-claim ceiling). Pure type — in
+// the default build.
+pub mod replay_tier;
 pub mod rlimits;
 // Issue #3865: OS sandbox PROFILE + fail-closed platform gate for inner-server
 // fs/network containment (the config, CLI, seam, and fail-closed gate).
@@ -81,6 +85,10 @@ pub mod sandbox_linux;
 pub mod shared_replay;
 pub mod tls;
 pub mod transport;
+// ADR-MCPS-021: bounded trust-propagation cache (Tier 1). Caching is a caller
+// concern (mcps-core does not cache); this wraps the injected TrustResolver with
+// the bounded-`T` window + negative-cache classification + fail-closed rules.
+pub mod trust_cache;
 
 pub use delegated_response_signer::DelegatedResponseSigner;
 pub use durable_replay::DurableReplayCache;
@@ -115,6 +123,7 @@ pub use proxy::Proxy;
 // Issue #4028: the Redis shared replay backend (feature-gated).
 #[cfg(feature = "redis_replay")]
 pub use redis_store::RedisAtomicReplayStore;
+pub use replay_tier::ReplayDurabilityTier;
 pub use rlimits::RLimits;
 pub use sandbox::NetworkPolicy;
 pub use sandbox::SandboxMode;
@@ -131,6 +140,8 @@ pub use tls::RustlsDirectProvider;
 pub use tls::ServerLimits;
 pub use tls::ServerOptions;
 pub use tls::TlsError;
+pub use transport::validate_asserted_identity_value;
+pub use transport::AssertedIdentityRejection;
 pub use transport::ExactMatchBinding;
 pub use transport::IdentityPolicy;
 pub use transport::IdentitySource;
@@ -138,6 +149,7 @@ pub use transport::MappedBinding;
 pub use transport::RequestHeaders;
 pub use transport::ReverseProxyHeaderFormat;
 pub use transport::ReverseProxyMtlsProvider;
+pub use trust_cache::BoundedTrustCache;
 pub use transport::StaticIdentityProvider;
 pub use transport::TransportBindingPolicy;
 pub use transport::TransportBindingProvider;

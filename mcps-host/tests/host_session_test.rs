@@ -116,7 +116,7 @@ fn sign_request_uses_injected_clock_and_rng() {
         .expect("session signs");
 
     let value: Value = serde_json::from_slice(&bytes).expect("parse signed request");
-    let envelope = &value["params"]["_meta"]["name.sundvall/mcps-security.request"];
+    let envelope = &value["params"]["_meta"]["se.syncom/mcps.request"];
 
     // issued_at/expires_at come from the injected clock + default lifetime.
     assert_eq!(envelope["issued_at"], json!(ISSUED_AT));
@@ -439,7 +439,7 @@ fn custom_lifetime_drives_expires_at() {
         .sign_tool_call(&id, "echo", json!({ "text": "hello" }), ON_BEHALF_OF, AUDIENCE, AUTH_HASH)
         .expect("session signs");
     let value: Value = serde_json::from_slice(&bytes).expect("parse");
-    let envelope = &value["params"]["_meta"]["name.sundvall/mcps-security.request"];
+    let envelope = &value["params"]["_meta"]["se.syncom/mcps.request"];
     assert_eq!(envelope["issued_at"], json!(ISSUED_AT));
     assert_eq!(envelope["expires_at"], json!("2026-05-28T20:01:00Z"));
 }

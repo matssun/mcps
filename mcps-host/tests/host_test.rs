@@ -149,7 +149,7 @@ fn host_overwrites_caller_supplied_request_envelope() {
     params.insert("arguments".to_string(), json!({ "text": "hello" }));
     params.insert(
         "_meta".to_string(),
-        json!({ "name.sundvall/mcps-security.request": { "signer": "did:evil:impostor" } }),
+        json!({ "se.syncom/mcps.request": { "signer": "did:evil:impostor" } }),
     );
 
     let bytes = host()

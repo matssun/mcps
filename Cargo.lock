@@ -726,6 +726,7 @@ name = "mcps-policy"
 version = "0.2.0"
 dependencies = [
  "mcps-core",
+ "mcps-host",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
