@@ -85,6 +85,10 @@ pub mod sandbox_linux;
 pub mod shared_replay;
 pub mod tls;
 pub mod transport;
+// ADR-MCPS-021: bounded trust-propagation cache (Tier 1). Caching is a caller
+// concern (mcps-core does not cache); this wraps the injected TrustResolver with
+// the bounded-`T` window + negative-cache classification + fail-closed rules.
+pub mod trust_cache;
 
 pub use delegated_response_signer::DelegatedResponseSigner;
 pub use durable_replay::DurableReplayCache;
@@ -143,6 +147,7 @@ pub use transport::MappedBinding;
 pub use transport::RequestHeaders;
 pub use transport::ReverseProxyHeaderFormat;
 pub use transport::ReverseProxyMtlsProvider;
+pub use trust_cache::BoundedTrustCache;
 pub use transport::StaticIdentityProvider;
 pub use transport::TransportBindingPolicy;
 pub use transport::TransportBindingProvider;
