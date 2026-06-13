@@ -251,3 +251,63 @@ for the current single-node Rust-native deployment profile. This approval does
 follow-up issues (Section 2) are implemented and tested.
 
 The single-node release gate is satisfied as of 2026-05-30.
+
+---
+
+## 8. v0.3 multi-node profile — composed claim (DRAFT, awaiting owner sign-off)
+
+> **STATUS: DRAFT. NOT YET ACTIVE.** This section composes ADR-MCPS-020 through
+> ADR-MCPS-023 into the v0.3 multi-node claim. Per this document's HITL rule the
+> author does **not** self-approve it. Until the owner signs Section 8 below, the
+> **only** active claim remains the single-node ceiling of Section 1; the
+> horizontal-scale row of Section 2 stays a forbidden claim.
+
+When signed, MCP-S MAY additionally be described — for a deployment that declares
+all four modes — as:
+
+> **"production-hardened for multi-node deployments within one trust domain / one
+> operator, at the security tier composed from the four declared deployment
+> modes."**
+
+The claim is **tiered, not unconditional**, and is read off the
+[v0.3 security-claim matrix](./v0.3-claim-matrix.md). It is the conjunction of:
+
+- **Replay durability** (ADR-MCPS-020) — the declared `ReplayDurabilityTier`; the
+  proxy surfaces that tier's own guarantee and cannot over-claim. Strict
+  production requires `REDIS_WAIT_QUORUM` or stronger.
+- **Trust propagation** (ADR-MCPS-021) — revocation enforced fleet-wide within the
+  bounded window `T` (default 60s); zero-window revocation is **not** claimed.
+- **Key custody** (ADR-MCPS-022) — `per_node_keyset` (default; tight blast radius,
+  explicit authorized key set) or `shared_remote_signer` (higher custody, not
+  smaller blast radius). A copied shared private key is forbidden.
+- **Ingress binding** (ADR-MCPS-023) — `end_to_end_mtls` or
+  `trusted_ingress_asserted`; SEP-2243 routing headers are never trusted
+  (ADR-MCPS-025).
+
+**Still forbidden in v0.3** (unchanged from Section 2 / the epic's "Not in v0.3"):
+multi-tenant isolation between mutually distrusting operators; unconditional
+replay safety on async failover; zero-window revocation; end-to-end channel
+binding under `trusted_ingress_asserted`; a smaller blast radius for shared-KMS
+identity than for per-node keys; copied private keys; a hostile shared-store
+threat model; cross-operator replay-store isolation.
+
+The RC-conditional delta ADRs (024 multi round-trip, 025 routing headers, 026
+signing-scope partition) are **implemented and tested** but remain conditional on
+the MCP 2026-07-28 release candidate; they harden the same deployment shape and
+do not themselves widen this claim.
+
+### 8.1 v0.3 owner sign-off
+
+| Field          | Value                                                     |
+| -------------- | --------------------------------------------------------- |
+| Document       | `docs/spec/security-boundary.md` §8 + `v0.3-claim-matrix.md` |
+| Gate type      | HITL release gate (multi-node claim blocked until signed) |
+| Author         | _(agent — does not self-approve)_                         |
+| Owner sign-off | _pending — Mats Sundvall_                                 |
+
+**Release-gate checklist (epic #7):** ADRs 020–023 accepted ✅; supported tiers
+implemented ✅; this composition section drafted ✅ (awaiting sign-off); conformance
+manifest lists the tiers + tests ✅ (`drift_guard_test` green); claim matrix states
+allowed/forbidden per tier ✅. The one gap is a **CI run of the v0.3 conformance
+suite** — the repository currently has no CI workflow (tracked separately). The
+v0.3 multi-node claim turns on only when the owner signs §8.1 above.

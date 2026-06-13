@@ -53,7 +53,7 @@
     "core_vector_files": 21,
     "authorization_vector_cases": 12,
     "total_vectors": 33,
-    "bazel_test_targets": 51
+    "bazel_test_targets": 54
   },
   "bazel_test_targets": [
     "//mcps-conformance:acceptance_test",
@@ -65,6 +65,8 @@
     "//mcps-conformance:stdio_harness_test",
     "//mcps-core:canonicalizer_proptest",
     "//mcps-core:mcps_core_test",
+    "//mcps-core:multi_round_trip_test",
+    "//mcps-core:signing_scope_test",
     "//mcps-core:vectors_test",
     "//mcps-demo-fileserver:server_test",
     "//mcps-demo-server:persistence_e2e_test",
@@ -90,6 +92,7 @@
     "//mcps-proxy:fault_injection_test",
     "//mcps-proxy:full_stack_test",
     "//mcps-proxy:key_source_test",
+    "//mcps-proxy:keyset_admission_test",
     "//mcps-proxy:ocsp_e2e_test",
     "//mcps-proxy:persistent_inner_test",
     "//mcps-proxy:persistent_scope_test",
