@@ -244,6 +244,7 @@ nt_rust_test(
         "MCPS_SRC_MTLS_CLIENT": "$(rlocationpath //mcps-transport:tests/mtls_client_test.rs)",
     },
     deps = [
+        "//mcps-test-paths:mcps_test_paths",
         "@crates_mcps//:serde_json",
     ],
 )
