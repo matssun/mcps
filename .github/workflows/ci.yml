@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# MCP-S continuous integration. The Rust toolchain is pinned by the committed
+# rust-toolchain.toml (1.94.1, matching the Bazel build), so rustup installs and
+# selects it automatically on the first cargo invocation — CI and local dev share
+# one toolchain.
+#
+# Gating policy:
+#   - BLOCKING: `cargo build` + `cargo test` over the whole workspace (this
+#     includes the mcps-conformance suite + the conformance drift guard, which
+#     resolve their fixtures via the cargo runfiles fallback in mcps-test-paths).
+#   - ADVISORY (continue-on-error): `cargo fmt --check` and `cargo clippy`. The
+#     repository was not developed under `cargo fmt`/`clippy -D warnings`, so these
+#     surface drift without blocking. Promote them to blocking once a one-time
+#     repo-wide format + lint cleanup lands (and bump rust-toolchain.toml together).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo:
+    name: cargo build + test (1.94.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # cryptoki-sys (declared non-optional for Bazel target exposure) builds its
+      # FFI bindings with libclang; install it defensively so the cargo closure
+      # links on a clean runner.
+      - name: System build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
+
+      - name: Select pinned toolchain (from rust-toolchain.toml)
+        run: rustup show && rustc --version && cargo --version
+
+      - name: Build (workspace, all targets)
+        run: cargo build --workspace --all-targets
+
+      - name: Test (workspace, incl. conformance suite + drift guard)
+        run: cargo test --workspace
+
+      - name: Format check (advisory)
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+      - name: Clippy (advisory)
+        run: cargo clippy --workspace --all-targets
+        continue-on-error: true
