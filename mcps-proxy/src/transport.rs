@@ -217,6 +217,59 @@ pub fn validate_asserted_identity_value(value: &str) -> Result<&str, AssertedIde
     Ok(trimmed)
 }
 
+/// The SEP-2243 transport routing header naming the JSON-RPC method (ADR-MCPS-025).
+/// Lowercased for case-insensitive [`RequestHeaders`] lookup.
+pub const MCP_METHOD_HEADER: &str = "mcp-method";
+
+/// The SEP-2243 transport routing header naming the tool/resource (ADR-MCPS-025).
+/// Lowercased for case-insensitive [`RequestHeaders`] lookup.
+pub const MCP_NAME_HEADER: &str = "mcp-name";
+
+/// Why a SEP-2243 routing header was rejected (ADR-MCPS-025).
+///
+/// Routing headers (`Mcp-Method` / `Mcp-Name`) are untrusted hints: the signed
+/// body is authoritative and the proxy never routes on them. But ADR-MCPS-025
+/// rule 4 applies the ADR-MCPS-023 strict-header rules to them too — a duplicated
+/// or malformed routing header is a header-smuggling / log-injection vector and
+/// fails closed at the transport boundary before the handler runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingHeaderRejection {
+    /// The header appeared more than once (a downstream-injected duplicate must
+    /// not be able to shadow or confuse the first).
+    Duplicate {
+        /// The offending header name (`mcp-method` / `mcp-name`).
+        header: &'static str,
+    },
+    /// The header's lone value failed the strict shape rules (empty, oversized, or
+    /// containing a control character) — see [`validate_asserted_identity_value`].
+    Malformed {
+        /// The offending header name (`mcp-method` / `mcp-name`).
+        header: &'static str,
+    },
+}
+
+/// Apply the ADR-MCPS-023 strict-header rules to the SEP-2243 routing headers
+/// (`Mcp-Method` / `Mcp-Name`) per ADR-MCPS-025 rule 4: each MUST be single-valued
+/// and well-formed (non-empty, length-bounded, no control characters). Absent
+/// headers pass — they are optional routing hints, not required. Present-but-bad
+/// headers fail closed; the proxy never trusts a routing header for any security
+/// decision, so this is hygiene (anti-smuggling), not a routing check.
+pub fn validate_routing_headers(headers: &RequestHeaders) -> Result<(), RoutingHeaderRejection> {
+    for header in [MCP_METHOD_HEADER, MCP_NAME_HEADER] {
+        match headers.count(header) {
+            0 => continue,
+            1 => {
+                let value = headers.first(header).unwrap_or("");
+                if validate_asserted_identity_value(value).is_err() {
+                    return Err(RoutingHeaderRejection::Malformed { header });
+                }
+            }
+            _ => return Err(RoutingHeaderRejection::Duplicate { header }),
+        }
+    }
+    Ok(())
+}
+
 /// TRUSTED header set by an upstream mTLS-terminating reverse proxy (e.g. Envoy /
 /// nginx forwarding `X-Forwarded-Client-Cert`). This lets MCP-S run behind
 /// enterprise ingress that already terminates mTLS, instead of terminating mTLS
@@ -1068,6 +1121,63 @@ mod tests {
                 "control characters must fail closed: {bad:?}"
             );
         }
+    }
+
+    // ---- ADR-MCPS-025 routing-header hygiene ----------------------------------
+
+    #[test]
+    fn routing_headers_absent_pass() {
+        // Mcp-Method / Mcp-Name are optional hints; absent is fine.
+        let headers = super::RequestHeaders::default();
+        assert_eq!(super::validate_routing_headers(&headers), Ok(()));
+    }
+
+    #[test]
+    fn routing_headers_well_formed_pass() {
+        let headers = super::RequestHeaders::from_pairs([
+            ("Mcp-Method", "tools/call"),
+            ("Mcp-Name", "echo"),
+        ]);
+        assert_eq!(super::validate_routing_headers(&headers), Ok(()));
+    }
+
+    #[test]
+    fn duplicate_routing_header_fails_closed() {
+        let headers = super::RequestHeaders::from_pairs([
+            ("Mcp-Method", "tools/call"),
+            ("mcp-method", "tools/list"),
+        ]);
+        assert_eq!(
+            super::validate_routing_headers(&headers),
+            Err(super::RoutingHeaderRejection::Duplicate {
+                header: super::MCP_METHOD_HEADER
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_routing_header_fails_closed() {
+        // A CRLF-laced routing header is a smuggling vector — fail closed even
+        // though the proxy never routes on it.
+        let headers =
+            super::RequestHeaders::from_pairs([("Mcp-Name", "echo\r\nX-Spoof: evil")]);
+        assert_eq!(
+            super::validate_routing_headers(&headers),
+            Err(super::RoutingHeaderRejection::Malformed {
+                header: super::MCP_NAME_HEADER
+            })
+        );
+    }
+
+    #[test]
+    fn empty_routing_header_fails_closed() {
+        let headers = super::RequestHeaders::from_pairs([("Mcp-Method", "   ")]);
+        assert_eq!(
+            super::validate_routing_headers(&headers),
+            Err(super::RoutingHeaderRejection::Malformed {
+                header: super::MCP_METHOD_HEADER
+            })
+        );
     }
 
     #[test]

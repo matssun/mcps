@@ -4,9 +4,16 @@
 
 ## Status
 
-Proposed — **conditional on the MCP 2026-07-28 release candidate**; revisit if
-the referenced SEP schema changes materially (v0.3 delta sketch). SEP-2243 is
-marked Final upstream; this ADR composes MCP-S verification on top of it.
+Accepted (targets v0.3). SEP-2243 is Final upstream, so the routing-header names
+are pinned. Implemented in `mcps-proxy`: `validate_routing_headers` enforces the
+ADR-MCPS-023 strict-header rules on `Mcp-Method` / `Mcp-Name` (single-valued,
+well-formed, length-bounded), wired at the transport seam (`tls::serve_once` /
+`serve_connection`) so a duplicated or malformed routing header fails closed with
+`mcps.transport_binding_failed` before the handler. The signed body remains
+authoritative — the proxy never routes on these headers — so "header cannot
+escalate" holds by construction. The `x-mcp-header`-promoted-argument
+body-agreement check (rule 3) awaits the upstream-locked set of security-relevant
+promoted arguments and is deferred with the rest of the RC-conditional surface.
 
 ## Context
 

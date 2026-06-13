@@ -397,6 +397,28 @@ fn cert_lifetime_rejection(
     Some(json_rpc_error_object(&McpsError::TransportBindingFailed, &id))
 }
 
+/// ADR-MCPS-025 routing-header hygiene rejection — runs at the SAME per-connection
+/// point as [`cert_lifetime_rejection`] (after the verified handshake, before the
+/// handler). Returns `Some(error_bytes)` when a SEP-2243 routing header
+/// (`Mcp-Method` / `Mcp-Name`) is duplicated or malformed, `None` when the routing
+/// headers are absent or well-formed.
+///
+/// The proxy never routes on these headers — the signed body is authoritative —
+/// so this is anti-smuggling hygiene (ADR-MCPS-025 rule 4 applying the ADR-MCPS-023
+/// strict-header rules). A defect maps to `mcps.transport_binding_failed`, the same
+/// transport-boundary token the sibling cert-lifetime / OCSP rejections use.
+fn routing_header_rejection(headers: &RequestHeaders, request: &[u8]) -> Option<Vec<u8>> {
+    crate::transport::validate_routing_headers(headers)
+        .err()
+        .map(|_rejection| {
+            let id = serde_json::from_slice::<serde_json::Value>(request)
+                .ok()
+                .and_then(|value| value.get("id").cloned())
+                .unwrap_or(serde_json::Value::Null);
+            json_rpc_error_object(&McpsError::TransportBindingFailed, &id)
+        })
+}
+
 /// Online OCSP revocation rejection (#4030) — the online sibling of
 /// [`cert_lifetime_rejection`], running at the SAME per-connection point (after
 /// the verified handshake, before the handler). Returns `Some(error_bytes)` (a
@@ -504,7 +526,9 @@ where
     // Enforce the per-connection rejection guards (max client-cert lifetime, then
     // online OCSP revocation under the `online_ocsp` feature) BEFORE the handler
     // (inner never reached when rejected).
-    let response = match connection_rejection(&stream.conn, options, &request.body) {
+    let response = match connection_rejection(&stream.conn, options, &request.body)
+        .or_else(|| routing_header_rejection(&headers, &request.body))
+    {
         Some(error) => error,
         None => handler(&request.body, identity.clone()),
     };
@@ -566,7 +590,9 @@ where
     let request = read_http_request(&mut stream, &options.limits)?;
     let headers = RequestHeaders::parse(&request.header_block);
     let identity = resolve_identity(&stream.conn, options, &headers);
-    let response = match connection_rejection(&stream.conn, options, &request.body) {
+    let response = match connection_rejection(&stream.conn, options, &request.body)
+        .or_else(|| routing_header_rejection(&headers, &request.body))
+    {
         Some(error) => error,
         None => handler(&request.body, identity),
     };
@@ -747,6 +773,29 @@ mod lifetime_tests {
             leaf_cert_lifetime_secs(garbage).is_none(),
             "unparseable bytes must yield None"
         );
+    }
+
+    #[test]
+    fn routing_header_rejection_fails_closed_on_bad_headers_only() {
+        // ADR-MCPS-025 rule 4 enforcement at the transport seam. Clean/absent
+        // routing headers pass; a duplicate or malformed one fails closed with
+        // mcps.transport_binding_failed bound to the request id.
+        use crate::transport::RequestHeaders;
+        let req = br#"{"jsonrpc":"2.0","id":"req-1","method":"tools/call"}"#;
+
+        let clean = RequestHeaders::from_pairs([("Mcp-Method", "tools/call")]);
+        assert!(super::routing_header_rejection(&clean, req).is_none());
+
+        let duplicate =
+            RequestHeaders::from_pairs([("Mcp-Method", "tools/call"), ("mcp-method", "tools/list")]);
+        let rejected =
+            super::routing_header_rejection(&duplicate, req).expect("duplicate must reject");
+        let value: serde_json::Value = serde_json::from_slice(&rejected).expect("json error object");
+        assert_eq!(value["error"]["message"], "mcps.transport_binding_failed");
+        assert_eq!(value["id"], "req-1");
+
+        let malformed = RequestHeaders::from_pairs([("Mcp-Name", "echo\r\nX-Spoof: evil")]);
+        assert!(super::routing_header_rejection(&malformed, req).is_some());
     }
 
     #[test]
