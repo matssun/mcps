@@ -4,11 +4,16 @@
 
 ## Status
 
-Proposed — **conditional on the MCP 2026-07-28 release candidate**; revisit if
-the referenced SEP schema changes materially (v0.3 delta sketch). SEP-2322's
-schema is marked "proposed but not locked" upstream; this ADR therefore binds to
-the SEP's *mechanism* and states MCP-S requirements that hold regardless of the
-final field names.
+Accepted (targets v0.3). The decision requires **no production-code change**: the
+existing per-leg `verify_request` + `(signer, audience, nonce)` replay contract
+(ADR-006/020) already treats each leg as an independent signed request, and
+`requestState` is opaque app data the proxy forwards to the inner server, never a
+security input. Confirmed by the ADR-011 conformance vectors in
+`mcps-core/tests/multi_round_trip_test.rs` (continuation accepted, leg replay
+rejected, requestState purchases no replay-exemption, forged requestState breaks
+the signature, retry-with-fresh-nonce accepted). SEP-2322's field names are not
+locked upstream, so this binds to the mechanism; a signed cross-leg binding field
+is deferred. Revisit if the SEP schema changes materially.
 
 ## Context
 
