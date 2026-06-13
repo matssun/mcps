@@ -64,3 +64,31 @@ nt_rust_test(
         "@crates_mcps//:serde_json",
     ],
 )
+
+# ADR-MCPS-024: multi round-trip (SEP-2322) replay conformance — per-leg
+# independence, requestState untrusted, fresh-nonce-per-leg/retry.
+nt_rust_test(
+    name = "multi_round_trip_test",
+    srcs = ["tests/multi_round_trip_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_core",
+        "@crates_mcps//:serde_json",
+    ],
+)
+
+# ADR-MCPS-026: signed/unsigned _meta partition (SEP-2575) — trace context
+# excluded from the preimage, protocolVersion in scope.
+nt_rust_test(
+    name = "signing_scope_test",
+    srcs = ["tests/signing_scope_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_core",
+        "@crates_mcps//:serde_json",
+    ],
+)

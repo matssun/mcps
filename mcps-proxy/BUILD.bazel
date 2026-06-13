@@ -11,6 +11,9 @@ package(default_visibility = ["//visibility:public"])
 # `#[cfg(feature = ...)]` fault/dev gate) ALL compile this exact file set — sharing
 # the list here prevents the instances from silently drifting apart.
 _PROXY_LIB_SRCS = [
+    # ADR-MCPS-022: explicit authorized server key-set + per-audience response-
+    # signing identity mode (per_node_keyset / shared_remote_signer).
+    "src/authorized_keyset.rs",
     "src/cli.rs",
     # Issue #3838 (ADR-MCPS-014): non-exporting reference ResponseSigner proving the
     # response-signing delegation seam. Always compiled; default-build, Bazel-tested.
@@ -34,6 +37,8 @@ _PROXY_LIB_SRCS = [
     # Issue #4028: Redis-backed shared atomic ReplayCache (behind #[cfg(feature =
     # "redis_replay")]; cfg'd out of the default build).
     "src/redis_store.rs",
+    # ADR-MCPS-020: declared replay-store durability tier (deployment assertion).
+    "src/replay_tier.rs",
     "src/rlimits.rs",
     # Issue #3865 / #4039: OS sandbox profile + fail-closed platform gate, plus the
     # Linux Landlock/seccomp ENFORCEMENT backend (sandbox_linux.rs is
@@ -45,6 +50,8 @@ _PROXY_LIB_SRCS = [
     "src/shared_replay.rs",
     "src/tls.rs",
     "src/transport.rs",
+    # ADR-MCPS-021: bounded trust-propagation cache (revocation window T).
+    "src/trust_cache.rs",
 ]
 
 # Single source of truth for the mcps_proxy library deps. All three library
@@ -373,6 +380,22 @@ nt_rust_test(
         ":mcps_proxy",
         "//mcps-core:mcps_core",
         "//mcps-host:mcps_host",
+        "@crates_mcps//:serde_json",
+    ],
+)
+
+# ADR-MCPS-022: per-node key custody — authorized key-set admission verified
+# through Core verify_response (per-node accept, unknown/revoked reject, shared
+# mode, algorithm boundary, 021+022 composition).
+nt_rust_test(
+    name = "keyset_admission_test",
+    srcs = ["tests/keyset_admission_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_proxy",
+        "//mcps-core:mcps_core",
         "@crates_mcps//:serde_json",
     ],
 )
