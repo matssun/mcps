@@ -32,6 +32,10 @@
 //! separate follow-up. Until it lands, the file cache remains single-node only and
 //! multi-node replay safety MUST NOT be claimed in a real deployment.
 
+// ADR-MCPS-022: explicit authorized server key set + per-audience response-signing
+// identity mode (per_node_keyset default | shared_remote_signer). The verifier-side
+// admission anchor; composes with `trust_cache::BoundedTrustCache` (ADR-MCPS-021).
+pub mod authorized_keyset;
 pub mod cli;
 // Issue #3838 (ADR-MCPS-014): a non-exporting reference `ResponseSigner` proving the
 // response-signing delegation seam — a backend whose key never leaves it can drive
@@ -90,6 +94,12 @@ pub mod transport;
 // the bounded-`T` window + negative-cache classification + fail-closed rules.
 pub mod trust_cache;
 
+pub use authorized_keyset::AuthorizedKeyEntry;
+pub use authorized_keyset::AuthorizedKeySet;
+pub use authorized_keyset::KeySetError;
+pub use authorized_keyset::KeySetTrustResolver;
+pub use authorized_keyset::KeyStatus;
+pub use authorized_keyset::ResponseSigningIdentityMode;
 pub use delegated_response_signer::DelegatedResponseSigner;
 pub use durable_replay::DurableReplayCache;
 pub use inner_launch::BoundedStderr;

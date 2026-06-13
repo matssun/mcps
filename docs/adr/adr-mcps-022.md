@@ -4,7 +4,11 @@
 
 ## Status
 
-Proposed (v0.3 sketch — under review)
+Accepted (targets v0.3). Tier 1 (`per_node_keyset`, default) and the
+`shared_remote_signer` admission gate are implemented in `mcps-proxy`
+(`authorized_keyset` module: `AuthorizedKeySet` + `KeySetTrustResolver`),
+composing with ADR-MCPS-021's `BoundedTrustCache`. Tier 2/3 hardware/KMS custody
+remains the `DelegatedResponseSigner` seam, landing fully under ADR-MCPS-019.
 
 ## Context
 
