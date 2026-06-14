@@ -213,11 +213,11 @@
       "notes": "MCPS-076 (audit gap G-3): EnvKeySource is gated behind the non-default dev_env_key_source feature, so the production binary refuses env key material at construction even with the runtime opt-in; the diagnostic names the required feature rebuild."
     },
     {
-      "property": "env key source loads + scrubs (MCPS-076): dev-feature build reads the seed, removes the env var after read, and signs correctly",
+      "property": "env key source loads + signs (MCPS-076): dev-feature build reads the seed and signs correctly WITHOUT mutating the process environment (issue #25)",
       "bazel_target": "//mcps-proxy:dev_env_key_source_test",
       "source": "mcps-proxy/tests/dev_env_key_source_test.rs",
-      "test_fn": "env_source_signs_and_removes_var_after_read",
-      "notes": "MCPS-076 (audit gap G-3): the dev/CI-only EnvKeySource (feature dev_env_key_source) loads all material, signs, AND removes the seed env var after reading it (defense in depth). This is the positive control for the env-keysource posture, now in a feature-gated unit test rather than the production binary."
+      "test_fn": "env_source_signs_without_mutating_process_env",
+      "notes": "MCPS-076 (audit gap G-3) + issue #25: the dev/CI-only EnvKeySource (feature dev_env_key_source) loads all material and signs. The read is now a PURE read — it does NOT remove the seed env var (the prior std::env::remove_var was unsound under threads); child-process secret isolation is the inner-launch env policy's job (no env inheritance by default), not a global mutation here. This is the positive control for the env-keysource posture, in a feature-gated unit test rather than the production binary."
     },
     {
       "property": "key-source errors never leak secret material",

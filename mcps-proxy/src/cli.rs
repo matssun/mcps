@@ -1625,6 +1625,20 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Build a `/bin/sh -c` inner whose script first DRAINS the dispatched request
+    /// from stdin (`cat >/dev/null`), then runs `script`. This mirrors a real inner
+    /// MCP server, which reads its request before responding. Without the drain a
+    /// `printf`-only fixture exits immediately, closing its stdin read-end; the
+    /// proxy's `write_all(request)` then races that close and, on Linux,
+    /// deterministically loses — surfacing as a broken-pipe write error instead of
+    /// the fixture's intended output. (The race is benign on macOS, which is why it
+    /// hid until the Linux CI gate ran these to completion.) Every shell fixture
+    /// that the proxy dispatches a request to goes through this helper so the whole
+    /// class is fixed at the source rather than per-test.
+    fn sh_inner(script: &str) -> Vec<String> {
+        args(&["/bin/sh", "-c", &format!("cat >/dev/null; {script}")])
+    }
+
     /// MCPS-084 / audit M-7: a one-shot inner that never drains stdin and never
     /// exits must NOT hang the single-threaded serve loop — the per-read deadline
     /// terminates it and the call fails closed within the budget. Load-bearing:
@@ -1700,9 +1714,9 @@ mod tests {
 
     #[test]
     fn inner_launches_in_explicit_working_dir_not_proxy_cwd() {
-        // The fixture ignores stdin and prints its OWN cwd to stdout. With an
-        // explicit --inner-working-dir, the child must run there, NOT in the
-        // proxy's cwd.
+        // The fixture prints its OWN cwd to stdout (after draining the request).
+        // With an explicit --inner-working-dir, the child must run there, NOT in
+        // the proxy's cwd.
         let tmp = std::env::temp_dir();
         let dir = tmp.join(format!("mcps036_wd_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
@@ -1712,7 +1726,7 @@ mod tests {
             working_dir: Some(dir.to_string_lossy().into_owned()),
             ..InnerLaunchConfig::new()
         };
-        let cmd = args(&["/bin/sh", "-c", "pwd -P"]);
+        let cmd = sh_inner("pwd -P");
         let inner = SubprocessInner::new(&cmd, launch).expect("construct");
         let seen = String::from_utf8(inner.dispatch(b"{}")).expect("utf8");
         let proxy_cwd = std::env::current_dir().expect("cwd");
@@ -1754,15 +1768,10 @@ mod tests {
             },
             ..InnerLaunchConfig::new()
         };
-        // The inner prints its soft fd limit, THEN drains stdin (`cat >/dev/null`)
-        // so it behaves like a real one-shot inner that reads its request before
-        // exiting. Without the drain the shell exits immediately after `ulimit -n`,
-        // closing its stdin read-end; the proxy's `write_all(request)` then races
-        // that close and, on Linux, loses — surfacing as a broken-pipe write error
-        // (cli.rs `run` propagates a genuine stdin write failure) instead of the
-        // captured "48". Draining stdin keeps the read-end open until the proxy's
-        // write lands, making the EFFECT assertion deterministic on every platform.
-        let cmd = args(&["/bin/sh", "-c", "ulimit -n; cat >/dev/null"]);
+        // The inner prints its soft fd limit; `sh_inner` drains the request stdin
+        // first so it behaves like a real one-shot inner and the EFFECT assertion
+        // is deterministic on every platform (see `sh_inner` for the race).
+        let cmd = sh_inner("ulimit -n");
         let inner = SubprocessInner::new(&cmd, launch).expect("construct");
         let seen = String::from_utf8(inner.dispatch(b"{}")).expect("utf8");
         assert_eq!(
@@ -1791,11 +1800,7 @@ mod tests {
             ..InnerLaunchConfig::new()
         };
         // The child WOULD print a clean frame if it ever ran; it must not.
-        let cmd = args(&[
-            "/bin/sh",
-            "-c",
-            "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'",
-        ]);
+        let cmd = sh_inner("printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'");
         let inner = SubprocessInner::new(&cmd, launch).expect("construct (validation is unix-ok)");
         let out = inner.dispatch(b"{}");
         let parsed: Value = serde_json::from_slice(&out).expect("dispatch returns a JSON frame");
@@ -1822,11 +1827,7 @@ mod tests {
             },
             ..InnerLaunchConfig::new()
         };
-        let cmd = args(&[
-            "/bin/sh",
-            "-c",
-            "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'",
-        ]);
+        let cmd = sh_inner("printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'");
         let inner = SubprocessInner::new(&cmd, launch).expect("construct");
         let out = inner.dispatch(b"{}");
         let parsed: Value = serde_json::from_slice(&out).expect("JSON frame");
@@ -1843,11 +1844,9 @@ mod tests {
         // stdout (the protocol stream) must contain ONLY the JSON frame; the
         // stderr noise must land in the bounded capture, never on stdout.
         let sink = Arc::new(RecordingSink::default());
-        let cmd = args(&[
-            "/bin/sh",
-            "-c",
+        let cmd = sh_inner(
             "printf 'STDERR-NOISE-LEAK' 1>&2; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'",
-        ]);
+        );
         let inner =
             SubprocessInner::with_log_sink(&cmd, InnerLaunchConfig::new(), Arc::clone(&sink) as _)
                 .expect("construct");
@@ -1876,13 +1875,11 @@ mod tests {
             stderr_cap_lines: 1000,
             ..InnerLaunchConfig::new()
         };
-        let cmd = args(&[
-            "/bin/sh",
-            "-c",
-            // 1000 'A' bytes to stderr; valid frame to stdout.
+        // 1000 'A' bytes to stderr; valid frame to stdout.
+        let cmd = sh_inner(
             "for i in $(seq 1 1000); do printf 'A' 1>&2; done; \
              printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'",
-        ]);
+        );
         let inner = SubprocessInner::with_log_sink(&cmd, launch, Arc::clone(&sink) as _)
             .expect("construct");
         let _ = inner.dispatch(b"{}");
@@ -1898,7 +1895,7 @@ mod tests {
     #[test]
     fn lifecycle_events_spawn_and_exit_are_emitted() {
         let sink = Arc::new(RecordingSink::default());
-        let cmd = args(&["/bin/sh", "-c", "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'"]);
+        let cmd = sh_inner("printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'");
         let inner = SubprocessInner::with_log_sink(&cmd, InnerLaunchConfig::new(), Arc::clone(&sink) as _)
             .expect("construct");
         let _ = inner.dispatch(b"{}");
@@ -1911,7 +1908,7 @@ mod tests {
     fn dirty_stdout_emits_protocol_error_event() {
         // The fixture writes non-JSON to stdout: the protocol stream is dirty.
         let sink = Arc::new(RecordingSink::default());
-        let cmd = args(&["/bin/sh", "-c", "printf 'NOT JSON AT ALL'"]);
+        let cmd = sh_inner("printf 'NOT JSON AT ALL'");
         let inner = SubprocessInner::with_log_sink(&cmd, InnerLaunchConfig::new(), Arc::clone(&sink) as _)
             .expect("construct");
         let _ = inner.dispatch(b"{}");
@@ -1929,9 +1926,10 @@ mod tests {
     // `SubprocessInner` proves what the spawned child actually receives.
 
     /// An inner command (`[cmd, arg...]`) that prints `${name}` (or empty if
-    /// unset) to stdout. Uses `sh -c`; portable on the (unix) CI hosts.
+    /// unset) to stdout. Uses `sh_inner` so it drains the request stdin first
+    /// (portable on the unix CI hosts; see `sh_inner` for the EPIPE race).
     fn dump_var_command(name: &str) -> Vec<String> {
-        args(&["/bin/sh", "-c", &format!("printf '%s' \"${{{name}}}\"")])
+        sh_inner(&format!("printf '%s' \"${{{name}}}\""))
     }
 
     fn run_inner(inner: &SubprocessInner) -> String {
@@ -2024,12 +2022,11 @@ mod tests {
     /// An inner command that prints `LEAKED` if `/dev/fd/<fd>` exists in the child
     /// (the descriptor was inherited across exec) or `CLOSED` otherwise. `/dev/fd`
     /// reflects the calling process's own descriptors on both Linux and macOS.
+    /// Uses `sh_inner` so it drains the request stdin first (see that helper).
     fn probe_fd_command(fd: libc::c_int) -> Vec<String> {
-        args(&[
-            "/bin/sh",
-            "-c",
-            &format!("if [ -e /dev/fd/{fd} ]; then printf LEAKED; else printf CLOSED; fi"),
-        ])
+        sh_inner(&format!(
+            "if [ -e /dev/fd/{fd} ]; then printf LEAKED; else printf CLOSED; fi"
+        ))
     }
 
     #[test]

@@ -9,6 +9,16 @@
 #   - BLOCKING: `cargo build` + `cargo test` over the whole workspace (this
 #     includes the mcps-conformance suite + the conformance drift guard, which
 #     resolve their fixtures via the cargo runfiles fallback in mcps-test-paths).
+#   - BLOCKING: `cargo test` over mcps-proxy with the four NON-DEFAULT feature
+#     gates enabled (dev_env_key_source, pkcs11_keysource, redis_replay,
+#     online_ocsp). The default `cargo test --workspace` does NOT compile these
+#     modules, so without this job the v0.3 hardening that lives behind them
+#     (the Redis WAIT-quorum fake-connection harness, the PKCS#11 sign-loop
+#     proof, the OCSP AIA-SSRF inet_aton parser, the env-key-source no-mutation
+#     contract) would have zero cargo-CI coverage. The live-infra e2e tests
+#     (real Redis / SoftHSM2 / OCSP responder) self-skip cleanly when their
+#     MCPS_TEST_* env vars are unset; they hard-fail only when
+#     MCPS_REQUIRE_LIVE_INFRA is set, which this job deliberately leaves unset.
 #   - ADVISORY (continue-on-error): `cargo fmt --check` and `cargo clippy`. The
 #     repository was not developed under `cargo fmt`/`clippy -D warnings`, so these
 #     surface drift without blocking. Promote them to blocking once a one-time
@@ -57,3 +67,34 @@ jobs:
       - name: Clippy (advisory)
         run: cargo clippy --workspace --all-targets
         continue-on-error: true
+
+  cargo-features:
+    name: cargo test (feature-gated backends, 1.94.1)
+    runs-on: ubuntu-latest
+    # No live infra is provisioned here, so MCPS_REQUIRE_LIVE_INFRA is left unset
+    # and the *_e2e_test suites self-skip. This job exercises the feature-gated
+    # UNIT tests + adapter compilation only.
+    steps:
+      - uses: actions/checkout@v4
+
+      # cryptoki-sys builds its FFI bindings with libclang (see the `cargo` job).
+      - name: System build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
+
+      - name: Select pinned toolchain (from rust-toolchain.toml)
+        run: rustup show && rustc --version && cargo --version
+
+      # Build the WHOLE workspace (not just -p mcps-proxy): the proxy's
+      # integration tests (persistent_inner_test, persistent_scope_test) spawn
+      # the cross-crate `mcps-demo-server` fixture binary, which cargo does NOT
+      # auto-build for another crate's integration tests. `--workspace` puts it
+      # (and the echo-inner fixture) in target/debug for mcps-test-paths to find.
+      - name: Build (workspace, all feature gates)
+        run: >-
+          cargo build --workspace --all-targets
+          --features dev_env_key_source,pkcs11_keysource,redis_replay,online_ocsp
+
+      - name: Test (mcps-proxy, all feature gates; e2e self-skip without live infra)
+        run: >-
+          cargo test -p mcps-proxy
+          --features dev_env_key_source,pkcs11_keysource,redis_replay,online_ocsp
