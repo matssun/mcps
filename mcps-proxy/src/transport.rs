@@ -406,11 +406,14 @@ impl ReverseProxyMtlsProvider {
         // leaf": XFCC element ordering is not a guaranteed invariant across
         // deployments, so positional leaf selection would be its own footgun.
         let mut found: Option<String> = None;
-        for element in split_xfcc_elements(value) {
+        // An unterminated quote anywhere in the header is malformed and fails
+        // closed (issue #21 residual): otherwise a stray `"` would collapse cert
+        // elements together and hide a conflicting element from the check below.
+        for element in split_xfcc_elements(value)? {
             // Within an element, `;` delimits pairs (outside quotes). Envoy quotes
             // any value containing a reserved character (`,`, `;`, `=`), so a
             // quoted Subject DN such as `Subject="CN=a,OU=b"` stays a single pair.
-            for pair in split_xfcc_element_pairs(element) {
+            for pair in split_xfcc_element_pairs(element)? {
                 let Some((key, raw_value)) = pair.split_once('=') else {
                     continue;
                 };
@@ -479,20 +482,28 @@ impl TransportBindingProvider for ReverseProxyMtlsProvider {
 /// quoted Subject DN such as `Subject="CN=a,OU=b"` is NOT split at its internal
 /// comma. Each returned element is then split into its `Key=Value` pairs by
 /// [`split_xfcc_element_pairs`].
-fn split_xfcc_elements(value: &str) -> Vec<&str> {
+fn split_xfcc_elements(value: &str) -> Option<Vec<&str>> {
     split_outside_quotes(value, ',')
 }
 
 /// Split a single XFCC cert element into its `Key=Value` pairs on `;` occurring
 /// outside a double-quoted value (a quoted Subject DN stays one pair).
-fn split_xfcc_element_pairs(element: &str) -> Vec<&str> {
+fn split_xfcc_element_pairs(element: &str) -> Option<Vec<&str>> {
     split_outside_quotes(element, ';')
 }
 
 /// Split `value` on every occurrence of `sep` that falls OUTSIDE a double-quoted
 /// span. Shared by the XFCC element and pair splitters so both honour Envoy's
 /// quoting rule identically.
-fn split_outside_quotes(value: &str, sep: char) -> Vec<&str> {
+///
+/// Fails closed (`None`) on an UNTERMINATED quote (issue #21 residual): a stray
+/// opening `"` with no closing `"` would otherwise leave the scan "inside a quote"
+/// for the rest of the value, swallowing every following `sep` and COLLAPSING
+/// multiple cert elements (or pairs) into one. An attacker could use that to hide
+/// a conflicting/forged element behind the first and bypass the cross-element
+/// conflict detection in [`ReverseProxyMtlsProvider::parse_xfcc`]. Envoy always
+/// emits balanced quotes, so an unterminated quote is malformed — reject it.
+fn split_outside_quotes(value: &str, sep: char) -> Option<Vec<&str>> {
     let mut parts = Vec::new();
     let mut in_quotes = false;
     let mut start = 0;
@@ -506,8 +517,12 @@ fn split_outside_quotes(value: &str, sep: char) -> Vec<&str> {
             _ => {}
         }
     }
+    if in_quotes {
+        // Unterminated quote → malformed; fail closed rather than collapse spans.
+        return None;
+    }
     parts.push(&value[start..]);
-    parts
+    Some(parts)
 }
 
 /// Strip a single pair of surrounding ASCII double quotes from `value`, if both
@@ -1111,6 +1126,35 @@ mod tests {
                 IdentitySource::UriSan
             ))
         );
+    }
+
+    #[test]
+    fn xfcc_unterminated_quote_fails_closed() {
+        // Issue #21 residual: a stray opening quote with no close would leave the
+        // splitter "inside a quote" for the rest of the value, swallowing the comma
+        // and COLLAPSING two cert elements into one — so a conflicting/forged
+        // element hides behind the first and the cross-element conflict check never
+        // fires. With balanced quotes the same two URIs are a conflict (fail
+        // closed); the unterminated-quote form must ALSO fail closed, never resolve
+        // to the first identity.
+        let provider = ReverseProxyMtlsProvider::new(
+            "x-forwarded-client-cert",
+            ReverseProxyHeaderFormat::Xfcc,
+            IdentityPolicy::UriSan,
+        );
+        let req = req_with(
+            "x-forwarded-client-cert",
+            "URI=\"spiffe://example.org/agent-1,URI=spiffe://example.org/evil",
+        );
+        assert_eq!(
+            provider.verified_identity(&req),
+            None,
+            "an unterminated XFCC quote must fail closed, never collapse elements"
+        );
+
+        // A stray quote inside an otherwise single element must also fail closed.
+        let req2 = req_with("x-forwarded-client-cert", "Hash=abc;URI=spiffe://x\"");
+        assert_eq!(provider.verified_identity(&req2), None);
     }
 
     #[test]
