@@ -14,6 +14,7 @@
 //! crate fronting a real device); it is the dependency-free reference that exercises
 //! and pins the seam contract.
 
+use mcps_core::verify_ed25519;
 use mcps_core::VerificationKey;
 
 use crate::key_source::KeyError;
@@ -50,7 +51,23 @@ impl DelegatedResponseSigner {
 
 impl ResponseSigner for DelegatedResponseSigner {
     fn sign_response(&self, preimage: &[u8]) -> Result<String, KeyError> {
-        (self.sign_fn)(preimage)
+        // Enforce the seam contract: the opaque callback is alg-agnostic, so do
+        // NOT trust whatever bytes it returns. The signature it produces MUST be a
+        // valid Ed25519 signature over the EXACT canonical preimage that verifies
+        // under the advertised public key. This fails closed on a malformed /
+        // wrong-length / wrong-algorithm signature and on a key-pairing mismatch
+        // (e.g. a future KMS/PKCS#11 adapter wired to the wrong key), so the proxy
+        // never emits a response signature that its own advertised key cannot
+        // verify (issue #22, cluster 3). One verify per response sign — negligible.
+        let signature = (self.sign_fn)(preimage)?;
+        verify_ed25519(preimage, &signature, &self.public_key).map_err(|_| {
+            KeyError::Malformed(
+                "delegated signer produced a signature that does not verify as Ed25519 under its \
+                 advertised public key"
+                    .to_string(),
+            )
+        })?;
+        Ok(signature)
     }
     fn response_public_key(&self) -> Result<VerificationKey, KeyError> {
         Ok(self.public_key.clone())
@@ -88,6 +105,45 @@ mod tests {
             verify_ed25519(preimage, &signature, &advertised).is_ok(),
             "delegated signature must verify under the advertised public key"
         );
+    }
+
+    /// Issue #22: a callback that returns a structurally valid-looking but WRONG
+    /// signature (here, a signature made by a DIFFERENT key than the advertised
+    /// public key) must fail closed — `sign_response` verifies the callback output
+    /// under the advertised key before returning, so a key-pairing mismatch never
+    /// yields a signature the proxy's own key cannot verify.
+    #[test]
+    fn signature_not_matching_advertised_key_fails_closed() {
+        let wrong_key = SigningKey::from_seed_bytes(&[7u8; 32]);
+        let advertised = SigningKey::from_seed_bytes(&SEED).public_key();
+        // The callback signs with `wrong_key`, but the signer advertises a
+        // different public key — the produced signature cannot verify under it.
+        let signer = DelegatedResponseSigner::new(
+            Box::new(move |preimage| Ok(wrong_key.sign(preimage))),
+            advertised,
+        );
+        assert!(
+            matches!(
+                signer.sign_response(b"canonical preimage").unwrap_err(),
+                KeyError::Malformed(_)
+            ),
+            "a signature that does not verify under the advertised key must fail closed"
+        );
+    }
+
+    /// Issue #22: a callback that returns non-Ed25519 / malformed bytes (not a
+    /// valid signature at all) must fail closed rather than propagate.
+    #[test]
+    fn malformed_callback_signature_fails_closed() {
+        let advertised = SigningKey::from_seed_bytes(&SEED).public_key();
+        let signer = DelegatedResponseSigner::new(
+            Box::new(|_preimage| Ok("not-a-real-ed25519-signature".to_string())),
+            advertised,
+        );
+        assert!(matches!(
+            signer.sign_response(b"x").unwrap_err(),
+            KeyError::Malformed(_)
+        ));
     }
 
     /// A non-exporting backend that is unavailable fails closed: the seam propagates

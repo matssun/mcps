@@ -294,6 +294,14 @@ impl Proxy {
         let mut request: Value =
             serde_json::from_slice(request_bytes).map_err(|_| McpsError::CanonicalizationFailed)?;
 
+        // Scrub ANY caller-supplied proxy-owned MCP-S `_meta` keys from EVERY
+        // `_meta` location (the container `params._meta` AND any nested `_meta`,
+        // e.g. under `params.arguments`) BEFORE injecting the proxy-authored
+        // block. This is what makes the proxy the sole writer: a caller cannot
+        // pre-seed a forged `*.verified`/`*.request`/`*.authorization` anywhere in
+        // the request and have it reach the inner server as proxy-authored.
+        scrub_proxy_owned_meta(&mut request);
+
         let context = VerifiedContext {
             verified_signer: verified.verified_signer.clone(),
             key_id: verified.key_id.clone(),
@@ -307,11 +315,13 @@ impl Proxy {
         let context_value =
             serde_json::to_value(&context).map_err(|_| McpsError::CanonicalizationFailed)?;
 
+        // Inject the SINGLE canonical `verified` block the proxy authors. The
+        // recursive scrub above already removed every proxy-owned key (the external
+        // `*.request` transport envelope, the `*.authorization` artifact not meant
+        // for the inner server, and any caller `*.verified` copy) from this and
+        // every nested `_meta`, so this is the only proxy-owned block forwarded.
         match request["params"]["_meta"].as_object_mut() {
             Some(meta) => {
-                meta.remove(REQUEST_META_KEY); // strip external transport envelope
-                meta.remove(AUTHORIZATION_META_KEY); // MCP-S authorization artifact: not for the inner server
-                meta.remove(VERIFIED_META_KEY); // sole-writer: drop any caller copy
                 meta.insert(VERIFIED_META_KEY.to_string(), context_value);
             }
             None => {
@@ -356,7 +366,7 @@ impl Proxy {
         let inner: Value =
             serde_json::from_slice(inner_response).map_err(|_| McpsError::CanonicalizationFailed)?;
 
-        let result = match inner.get("result") {
+        let mut result = match inner.get("result") {
             // OBJECT result — sign the inner result object in place.
             Some(result) if result.is_object() => result.clone(),
             // NON-OBJECT result (scalar/array/null) — preserve under `value` and
@@ -372,6 +382,14 @@ impl Proxy {
             // real error to the caller (issue #4077); both sides share the key.
             None => json!({ RESPONSE_WRAP_INNER_ERROR_KEY: inner.clone() }),
         };
+
+        // Scrub any inner-server-forged proxy-owned MCP-S `_meta` keys from EVERY
+        // `_meta` location in the result (including nested ones, e.g. under
+        // `result.content[].metadata._meta`) BEFORE the proxy adds its canonical
+        // `result._meta.response` and signs. A hostile inner therefore cannot
+        // smuggle a forged `*.response`/`*.verified`/`*.request`/`*.authorization`
+        // block into a response that then carries the proxy's signature.
+        scrub_proxy_owned_meta(&mut result);
 
         let mut response = json!({
             "jsonrpc": "2.0",
@@ -402,8 +420,56 @@ impl Proxy {
     }
 }
 
+/// The four MCP-S `_meta` keys the proxy EXCLUSIVELY owns at the trust boundary
+/// (ADR-MCPS-014 / ADR-MCPS-026). The proxy is the sole writer of each; any
+/// caller- or inner-server-supplied copy is scrubbed before the proxy forwards a
+/// request or signs a response. This is the explicit protocol-owned key set — NOT
+/// a `se.syncom/mcps.*` prefix scrub — so unrelated `_meta` keys are untouched.
+const PROXY_OWNED_META_KEYS: [&str; 4] = [
+    REQUEST_META_KEY,
+    RESPONSE_META_KEY,
+    VERIFIED_META_KEY,
+    AUTHORIZATION_META_KEY,
+];
+
+/// Recursively remove the four [`PROXY_OWNED_META_KEYS`] from EVERY `_meta` object
+/// anywhere in `value` (issue #22, cluster 3): the container `_meta`, and any
+/// `_meta` nested arbitrarily deep under `params`/`arguments`/`result`/`content`
+/// — including through arrays. Only these protocol-owned keys are removed; all
+/// other `_meta` content is preserved. The proxy writes its single canonical block
+/// AFTER this scrub, so the authoritative block is never the one removed.
+///
+/// This enforces the trust-boundary invariant that MCP-S metadata is proxy-owned:
+/// a caller cannot smuggle a forged nested `*.verified` to the inner server, and a
+/// hostile inner cannot smuggle a forged nested `*.response`/`*.request`/
+/// `*.authorization` into a response the proxy then signs.
+fn scrub_proxy_owned_meta(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            // Strip the proxy-owned keys from this object's own `_meta`, if any.
+            if let Some(meta) = map.get_mut("_meta").and_then(Value::as_object_mut) {
+                for key in PROXY_OWNED_META_KEYS {
+                    meta.remove(key);
+                }
+            }
+            // Recurse into every member to reach nested `_meta` objects (and the
+            // just-scrubbed `_meta` itself, harmlessly).
+            for child in map.values_mut() {
+                scrub_proxy_owned_meta(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_proxy_owned_meta(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::scrub_proxy_owned_meta;
     use super::Proxy;
     use mcps_core::request_hash;
     use mcps_core::request_signing_preimage;
@@ -411,10 +477,15 @@ mod tests {
     use mcps_core::InMemoryTrustResolver;
     use mcps_core::SigningKey;
     use mcps_core::REQUEST_META_KEY;
+    use mcps_core::RESPONSE_META_KEY;
     use mcps_core::SIG_ALG_ED25519;
+    use mcps_core::VERIFIED_META_KEY;
     use mcps_core::VERSION_DRAFT_01;
+    use mcps_policy::AUTHORIZATION_META_KEY;
     use serde_json::json;
     use serde_json::Value;
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
     const SIGNER: &str = "did:example:agent-1";
     const SIGNER_KEY_ID: &str = "key-1";
@@ -615,5 +686,196 @@ mod tests {
         // what the client receives.
         let is_verbatim = value.get("error").is_some() && value["id"] == Value::Null;
         assert!(!is_verbatim, "hostile inner error must not be forwarded verbatim");
+    }
+
+    // ---- Issue #22 (cluster 3): proxy-owned `_meta` scrub at EVERY location ----
+
+    /// A `Proxy` whose inner records the forwarded request bytes (so a test can
+    /// inspect exactly what crossed the trust boundary) and returns a minimal
+    /// valid object result.
+    fn proxy_capturing(captured: Arc<Mutex<Vec<u8>>>) -> Proxy {
+        let inner = move |request: &[u8]| -> Vec<u8> {
+            *captured.lock().expect("capture lock") = request.to_vec();
+            serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": REQUEST_ID, "result": {} }))
+                .expect("serialize inner result")
+        };
+        Proxy::new(
+            server_key(),
+            SERVER,
+            SERVER_KEY_ID,
+            Box::new(inbound_resolver()),
+            AUDIENCE,
+            SKEW,
+            Box::new(inner),
+        )
+    }
+
+    /// A signed inbound request that ALSO carries attacker-planted proxy-owned
+    /// `_meta` blocks nested under `params.arguments._meta` (a forged `*.verified`
+    /// the caller hopes the inner will trust) plus an unrelated nested `_meta` key.
+    /// Signed AFTER planting, so the nested blocks are within the (legitimately
+    /// signed) request — exactly the hostile case the scrub must defeat.
+    fn signed_request_with_forged_nested(nonce: &str) -> Vec<u8> {
+        let mut request = json!({
+            "id": REQUEST_ID,
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "echo",
+                "arguments": {
+                    "text": "hello",
+                    "_meta": {
+                        VERIFIED_META_KEY: { "verified_signer": "did:evil:impostor" },
+                        AUTHORIZATION_META_KEY: { "forged": true },
+                        "io.example/keep": "unrelated-nested-meta"
+                    }
+                },
+                "_meta": {
+                    REQUEST_META_KEY: {
+                        "version": VERSION_DRAFT_01,
+                        "signer": SIGNER,
+                        "on_behalf_of": ON_BEHALF_OF,
+                        "audience": AUDIENCE,
+                        "authorization_hash": AUTH_HASH,
+                        "nonce": nonce,
+                        "issued_at": ISSUED_AT,
+                        "expires_at": EXPIRES_AT,
+                        "signature": { "alg": SIG_ALG_ED25519, "key_id": SIGNER_KEY_ID },
+                    }
+                }
+            }
+        });
+        let preimage = request_signing_preimage(&request).expect("request preimage");
+        let signature = signer_key().sign(&preimage);
+        request["params"]["_meta"][REQUEST_META_KEY]["signature"]["value"] =
+            Value::String(signature);
+        serde_json::to_vec(&request).expect("serialize signed request")
+    }
+
+    #[test]
+    fn forged_nested_verified_is_scrubbed_from_forwarded_request() {
+        let nonce = "nonce-scrub-req-1";
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let proxy = proxy_capturing(Arc::clone(&captured));
+        let _ = proxy.handle(&signed_request_with_forged_nested(nonce), now());
+
+        let forwarded: Value =
+            serde_json::from_slice(&captured.lock().expect("lock")).expect("parse forwarded");
+
+        // The forged nested `*.verified` / `*.authorization` are gone from the
+        // nested `arguments._meta`...
+        let nested = &forwarded["params"]["arguments"]["_meta"];
+        assert!(
+            nested.get(VERIFIED_META_KEY).is_none(),
+            "a forged nested *.verified must be scrubbed before forwarding"
+        );
+        assert!(
+            nested.get(AUTHORIZATION_META_KEY).is_none(),
+            "a forged nested *.authorization must be scrubbed before forwarding"
+        );
+        // ...while an unrelated nested `_meta` key survives.
+        assert_eq!(
+            nested["io.example/keep"],
+            Value::String("unrelated-nested-meta".to_string()),
+            "unrelated nested _meta keys must be preserved"
+        );
+        // The proxy authors EXACTLY ONE canonical verified block, at params._meta,
+        // and it reflects the verified signer (not the attacker's forged value).
+        assert_eq!(
+            forwarded["params"]["_meta"][VERIFIED_META_KEY]["verified_signer"],
+            Value::String(SIGNER.to_string()),
+            "the canonical verified block is the proxy-authored one"
+        );
+    }
+
+    #[test]
+    fn forged_nested_mcps_blocks_scrubbed_from_signed_response() {
+        let nonce = "nonce-scrub-resp-1";
+        // A hostile inner returns an object result with forged proxy-owned blocks
+        // nested deep under result.content[].metadata._meta, plus an unrelated key.
+        let proxy = proxy_returning(json!({
+            "jsonrpc": "2.0",
+            "id": REQUEST_ID,
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": "hello",
+                    "metadata": {
+                        "_meta": {
+                            RESPONSE_META_KEY: { "server_signer": "did:evil:impostor" },
+                            VERIFIED_META_KEY: { "forged": true },
+                            REQUEST_META_KEY: { "forged": true },
+                            AUTHORIZATION_META_KEY: { "forged": true },
+                            "io.example/keep": "unrelated-nested-meta"
+                        }
+                    }
+                }]
+            }
+        }));
+        let out = proxy.handle(&signed_request(nonce), now());
+
+        // The outgoing envelope still verifies (the canonical response block the
+        // proxy wrote is intact and signs the scrubbed result).
+        verify_response(&out, &server_resolver(), &expected_request_hash(nonce))
+            .expect("scrubbed response must still be a signed, request-bound envelope");
+
+        let value = out_value(&out);
+        let nested = &value["result"]["content"][0]["metadata"]["_meta"];
+        for key in [
+            RESPONSE_META_KEY,
+            VERIFIED_META_KEY,
+            REQUEST_META_KEY,
+            AUTHORIZATION_META_KEY,
+        ] {
+            assert!(
+                nested.get(key).is_none(),
+                "forged nested proxy-owned key {key} must be scrubbed before signing"
+            );
+        }
+        assert_eq!(
+            nested["io.example/keep"],
+            Value::String("unrelated-nested-meta".to_string()),
+            "unrelated nested _meta keys must survive the response scrub"
+        );
+        // The proxy's own canonical response block is present and authoritative.
+        assert_eq!(
+            value["result"]["_meta"][RESPONSE_META_KEY]["server_signer"],
+            Value::String(SERVER.to_string()),
+            "the canonical response block is the proxy-authored one"
+        );
+    }
+
+    #[test]
+    fn scrub_removes_only_proxy_owned_keys_through_objects_and_arrays() {
+        // Proxy-owned keys planted in _meta at top level, in a nested object, and
+        // inside an array element; plus unrelated _meta keys at each location.
+        let mut value = json!({
+            "_meta": {
+                REQUEST_META_KEY: { "x": 1 },
+                "io.example/top": "keep"
+            },
+            "nested": {
+                "_meta": {
+                    VERIFIED_META_KEY: { "x": 2 },
+                    "io.example/nested": "keep"
+                }
+            },
+            "items": [
+                { "_meta": { RESPONSE_META_KEY: { "x": 3 }, AUTHORIZATION_META_KEY: { "x": 4 }, "io.example/arr": "keep" } }
+            ]
+        });
+        scrub_proxy_owned_meta(&mut value);
+
+        // Every proxy-owned key removed at every depth (object + array).
+        assert!(value["_meta"].get(REQUEST_META_KEY).is_none());
+        assert!(value["nested"]["_meta"].get(VERIFIED_META_KEY).is_none());
+        assert!(value["items"][0]["_meta"].get(RESPONSE_META_KEY).is_none());
+        assert!(value["items"][0]["_meta"]
+            .get(AUTHORIZATION_META_KEY)
+            .is_none());
+        // Every unrelated _meta key preserved at every depth.
+        assert_eq!(value["_meta"]["io.example/top"], json!("keep"));
+        assert_eq!(value["nested"]["_meta"]["io.example/nested"], json!("keep"));
+        assert_eq!(value["items"][0]["_meta"]["io.example/arr"], json!("keep"));
     }
 }
