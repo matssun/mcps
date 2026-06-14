@@ -146,6 +146,22 @@ fn strip_signature_value(
 /// caller has already validated envelope presence via [`strip_signature_value`].
 /// Stripping an absent key is a no-op, so an object with no trace fields produces
 /// exactly the same preimage as before this rule existed.
+///
+/// # Scope is container-level ONLY — by design (issue #22, cluster 3)
+///
+/// The exclusion targets EXACTLY the located container's `_meta`
+/// (`params._meta` for a request, `result._meta` for a response) and is NOT
+/// recursive. A trace-context key in a NESTED `_meta` (e.g.
+/// `params.arguments._meta.traceparent`) is deliberately LEFT IN signing scope and
+/// is therefore integrity-protected like any other application payload (ADR-026
+/// rule 6). The rationale: the W3C Trace Context exclusion exists solely because
+/// legitimate tracing middle boxes rewrite the request/response's OWN trace context
+/// (at the container `_meta`) in flight; a `traceparent` buried inside the
+/// application's `arguments` is not that transport-level field — it is data the
+/// caller chose to send, so signing it is correct. Broadening the exclusion to
+/// nested `_meta` would let an attacker move security-relevant bytes out of signing
+/// scope simply by nesting them under a reserved name. The boundary is pinned by
+/// `nested_trace_key_is_in_signing_scope`.
 fn strip_observability_meta(object: &mut Value, location: EnvelopeLocation) {
     if let Some(meta) = object
         .get_mut(location.container_key())
@@ -339,6 +355,27 @@ mod tests {
             request_signing_preimage(&a).expect("preimage"),
             request_signing_preimage(&b).expect("preimage"),
             "rewriting traceparent (as a middle box would) must not change the preimage"
+        );
+    }
+
+    #[test]
+    fn nested_trace_key_is_in_signing_scope() {
+        // Issue #22 (cluster 3): the trace-context exclusion is container-`_meta`-
+        // level ONLY. A `traceparent` nested under `params.arguments._meta` is NOT
+        // the request's transport-level trace context — it is application payload
+        // and stays IN signing scope, so mutating it MUST change the preimage.
+        // This pins the boundary against an accidental broadening of the exclusion
+        // (which would let an attacker exclude bytes from signing by nesting them
+        // under a reserved name).
+        let mut base = request_object();
+        base["params"]["arguments"]["_meta"] = json!({ "traceparent": "00-aaaa-1" });
+        let mut altered = request_object();
+        altered["params"]["arguments"]["_meta"] = json!({ "traceparent": "00-bbbb-2" });
+        assert_ne!(
+            request_signing_preimage(&base).expect("preimage"),
+            request_signing_preimage(&altered).expect("preimage"),
+            "a NESTED _meta.traceparent is integrity-protected; only the container \
+             _meta trace context is excluded from the preimage"
         );
     }
 
