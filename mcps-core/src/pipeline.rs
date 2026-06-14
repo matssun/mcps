@@ -190,6 +190,11 @@ pub fn verify_request(
         .map_err(McpsError::from)?;
 
     // Step 11 — canonicalize (signature.value removed) and verify Ed25519.
+    // The preimage is built from `value` (a serde_json::Value, which cannot
+    // represent duplicate members); duplicate-key rejection is guaranteed by the
+    // raw-bytes `canonicalize(raw_bytes)` at step 3 ABOVE, which fails closed
+    // before we reach here. That ordering is locked by
+    // `duplicate_key_wins_over_envelope_extraction` (issue #20, cluster 1).
     let preimage = request_signing_preimage(&value)?;
     let signature_value = envelope
         .signature

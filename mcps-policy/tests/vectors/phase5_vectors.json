@@ -654,5 +654,60 @@
         "signer": "did:example:authority-1"
       }
     ]
+  },
+  {
+    "config": {
+      "expected_audience": "did:example:server-1",
+      "max_clock_skew_secs": 300
+    },
+    "description": "Artifact contains a duplicate object member; JCS rejects it (never last-wins dedup-and-verify).",
+    "expected": "mcps.authorization_malformed",
+    "name": "authorization_duplicate_key",
+    "now_unix": 1779998460,
+    "request": {
+      "id": "req-1",
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "_meta": {
+          "se.syncom/mcps.authorization": {
+            "artifact": "eyJzdWJqZWN0IjoiZGlkOmV4YW1wbGU6dXNlci0xIiwiYXVkaWVuY2UiOiJkaWQ6ZXhhbXBsZTpzZXJ2ZXItMSIsImV4cGlyZXNfYXQiOiIyMDI2LTA1LTI4VDIxOjAwOjAwWiIsImdyYW50ZWUiOiJkaWQ6ZXhhbXBsZTphZ2VudC0xIiwiZ3JhbnRzIjpbeyJtZXRob2QiOiJ0b29scy9jYWxsIiwidG9vbCI6ImVjaG8ifV0sImlzc3VlciI6ImRpZDpleGFtcGxlOmF1dGhvcml0eS0xIiwibm90X2JlZm9yZSI6IjIwMjYtMDUtMjhUMjA6MDA6MDBaIiwicHJvZmlsZSI6InNlLnN5bmNvbS9tY3BzLWF1dGh6LXJlZmVyZW5jZS12MSIsInJldm9jYXRpb25faWQiOiJyZXYtMSIsInNpZ25hdHVyZSI6eyJhbGciOiJFZDI1NTE5Iiwia2V5X2lkIjoiYXV0aG9yaXR5LWtleS0xIiwidmFsdWUiOiJ5R193b3prMVZ2YnRXRXhrS1lEMjJOS1hJbHd0MVV1b25Dd2lWT0VYd05TNC1WSTVmUUlCRFRVa3ZYOXRNLWx2NnhBeDdIUF9LUDkyTlhIblRTWlFCZyJ9LCJzdWJqZWN0IjoiZGlkOmV4YW1wbGU6dXNlci0xIn0",
+            "profile": "se.syncom/mcps-authz-reference-v1"
+          },
+          "se.syncom/mcps.request": {
+            "audience": "did:example:server-1",
+            "authorization_hash": "sha256:Z11U5V0xRBoBuNoUHpdD-kDHZw7qnDA3qbHx2LNXZT0",
+            "expires_at": "2026-05-28T20:05:00Z",
+            "issued_at": "2026-05-28T20:00:00Z",
+            "nonce": "nonce-dupkey-01",
+            "on_behalf_of": "did:example:user-1",
+            "signature": {
+              "alg": "Ed25519",
+              "key_id": "key-1",
+              "value": "jfvkDwNg-OoN_xtQ5giCJ4Wz4IdAjdAZ_cN0QBVWNd6EunQe1WWc3vFptkyepiLlQ4yGLPcvEGq2LGW1HlGiDQ"
+            },
+            "signer": "did:example:agent-1",
+            "version": "draft-01"
+          }
+        },
+        "arguments": {
+          "text": "hello"
+        },
+        "name": "echo"
+      }
+    },
+    "revoked": [],
+    "trust": [
+      {
+        "key_id": "key-1",
+        "public_key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "signer": "did:example:agent-1"
+      },
+      {
+        "key_id": "authority-key-1",
+        "public_key": "GX9rI-FshTLGq8g4-s1ep4m-DHaykgM0A5v6iz02jWE",
+        "signer": "did:example:authority-1"
+      }
+    ]
   }
 ]

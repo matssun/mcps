@@ -129,8 +129,20 @@ impl ReferenceProfile {
         revocation: &dyn RevocationSource,
         now_unix: i64,
     ) -> Result<(), PolicyError> {
-        let artifact: Value =
-            serde_json::from_slice(artifact_bytes).map_err(|_| PolicyError::AuthorizationMalformed)?;
+        // Enforce the JCS-safe domain on the RAW artifact bytes FIRST — in
+        // particular duplicate-member rejection, which the `serde_json::Value`
+        // path below cannot detect (its `Map` silently keeps the last duplicate).
+        // The issuer signature is then verified over a preimage derived from these
+        // validated, canonical bytes — never from a duplicate-collapsed `Value`.
+        // This makes `authorize` self-protecting: the `PolicyEvaluator` already
+        // runs the same raw `canonicalize` in its hash-binding step, but the
+        // public `AuthorizationProfile` trait does not guarantee that ordering, so
+        // a direct caller must not be able to get a signature verified over bytes
+        // that differ from the wire bytes (cluster 1, issue #20).
+        let canonical_artifact =
+            canonicalize(artifact_bytes).map_err(|_| PolicyError::AuthorizationMalformed)?;
+        let artifact: Value = serde_json::from_slice(&canonical_artifact)
+            .map_err(|_| PolicyError::AuthorizationMalformed)?;
         let grant: ReferenceGrant = serde_json::from_value(artifact.clone())
             .map_err(|_| PolicyError::AuthorizationMalformed)?;
 
@@ -645,6 +657,38 @@ mod tests {
         assert_eq!(
             authorize(&artifact, &verified, &other, &InMemoryRevocationSource::new()),
             AuthorizationDecision::Deny(PolicyError::AuthorizationScopeDenied)
+        );
+    }
+
+    /// Issue #20 (cluster 1) — defense-in-depth: `authorize` must reject an
+    /// artifact carrying a DUPLICATE object member on its own, never verify the
+    /// issuer signature over duplicate-collapsed (last-wins) bytes. The
+    /// `PolicyEvaluator` already rejects this at its hash-binding step, but the
+    /// public `AuthorizationProfile` trait does not promise that ordering, so a
+    /// direct `authorize` caller must still be protected. We call `authorize`
+    /// DIRECTLY (bypassing the evaluator's hash check) to pin the profile-level
+    /// guarantee.
+    #[test]
+    fn duplicate_key_artifact_is_malformed_not_signature_verified() {
+        let artifact = mint_reference_grant(&default_spec(), &issuer_key(), ISSUER_KEY_ID).unwrap();
+        // Inject a second top-level `subject` member right after the opening brace.
+        // serde_json::Value cannot represent this, so it is built textually; the
+        // bytes are otherwise well-formed JSON whose ONLY defect is the duplicate.
+        let text = String::from_utf8(artifact).unwrap();
+        let dup = format!("{{\"subject\":\"did:example:user-1\",{}", &text[1..]);
+        let dup_bytes = dup.into_bytes();
+        let verified = verified_for(&dup_bytes);
+        let decision = authorize(
+            &dup_bytes,
+            &verified,
+            &echo_request(),
+            &InMemoryRevocationSource::new(),
+        );
+        assert_eq!(
+            decision,
+            AuthorizationDecision::Deny(PolicyError::AuthorizationMalformed),
+            "a duplicate-member artifact must fail closed as malformed, never be \
+             signature-verified over last-wins deduplicated bytes"
         );
     }
 

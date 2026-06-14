@@ -365,6 +365,41 @@ fn main() {
         ));
     }
 
+    // 13. authorization_duplicate_key — artifact carries a DUPLICATE object member
+    //     (issue #20, cluster 1). JCS rejects duplicates rather than last-wins
+    //     dedup-and-verify; the evaluator's raw `canonicalize` hash step (and the
+    //     profile's own raw canonicalize) fail closed as authorization_malformed.
+    {
+        let artifact = mint_reference_grant(&base_spec(), &issuer_key(), ISSUER_KEY_ID).unwrap();
+        // Inject a second top-level `subject` member after the opening brace.
+        // serde_json::Value cannot represent a duplicate, so the bytes are built
+        // textually; they are otherwise well-formed JSON whose only defect is the
+        // duplicate member.
+        let text = String::from_utf8(artifact).expect("artifact is utf8");
+        let dup = format!("{{\"subject\":\"{ON_BEHALF_OF}\",{}", &text[1..]);
+        let dup_bytes = dup.into_bytes();
+        let block = authorization_block(REFERENCE_PROFILE_ID, &dup_bytes);
+        // Sign over the raw sha256 of the duplicate bytes (canonicalize would
+        // reject them) so Core verification passes and the evaluator reaches the
+        // profile's hash computation, which canonicalizes and fails closed.
+        let req = signed_request(
+            "nonce-dupkey-01",
+            "echo",
+            echo_args.clone(),
+            Some(block),
+            &sha256_hash_id(&dup_bytes),
+        );
+        vectors.push(vector(
+            "authorization_duplicate_key",
+            "Artifact contains a duplicate object member; JCS rejects it (never \
+             last-wins dedup-and-verify).",
+            req,
+            None,
+            vec![],
+            "mcps.authorization_malformed",
+        ));
+    }
+
     let document = Value::Array(vectors);
     println!(
         "{}",
