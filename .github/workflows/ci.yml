@@ -84,9 +84,14 @@ jobs:
       - name: Select pinned toolchain (from rust-toolchain.toml)
         run: rustup show && rustc --version && cargo --version
 
-      - name: Build (mcps-proxy, all feature gates)
+      # Build the WHOLE workspace (not just -p mcps-proxy): the proxy's
+      # integration tests (persistent_inner_test, persistent_scope_test) spawn
+      # the cross-crate `mcps-demo-server` fixture binary, which cargo does NOT
+      # auto-build for another crate's integration tests. `--workspace` puts it
+      # (and the echo-inner fixture) in target/debug for mcps-test-paths to find.
+      - name: Build (workspace, all feature gates)
         run: >-
-          cargo build -p mcps-proxy --all-targets
+          cargo build --workspace --all-targets
           --features dev_env_key_source,pkcs11_keysource,redis_replay,online_ocsp
 
       - name: Test (mcps-proxy, all feature gates; e2e self-skip without live infra)
