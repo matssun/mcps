@@ -2034,11 +2034,18 @@ mod tests {
     /// An inner command that prints `LEAKED` if `/dev/fd/<fd>` exists in the child
     /// (the descriptor was inherited across exec) or `CLOSED` otherwise. `/dev/fd`
     /// reflects the calling process's own descriptors on both Linux and macOS.
+    ///
+    /// It drains its request stdin first (`cat >/dev/null`) so the child does not
+    /// exit before the proxy finishes writing the dispatched request — see
+    /// `dump_var_command` for the same EPIPE race that is benign on macOS but
+    /// deterministic on Linux.
     fn probe_fd_command(fd: libc::c_int) -> Vec<String> {
         args(&[
             "/bin/sh",
             "-c",
-            &format!("if [ -e /dev/fd/{fd} ]; then printf LEAKED; else printf CLOSED; fi"),
+            &format!(
+                "cat >/dev/null; if [ -e /dev/fd/{fd} ]; then printf LEAKED; else printf CLOSED; fi"
+            ),
         ])
     }
 
