@@ -1614,6 +1614,7 @@ mod tests {
     use super::SubprocessInner;
     use crate::sandbox::NetworkPolicy;
     use crate::sandbox::SandboxMode;
+    use crate::sandbox::SandboxProfile;
     use mcps_core::SigningKey;
     use mcps_core::TrustResolver;
     use serde_json::Value;
@@ -1753,7 +1754,15 @@ mod tests {
             },
             ..InnerLaunchConfig::new()
         };
-        let cmd = args(&["/bin/sh", "-c", "ulimit -n"]);
+        // The inner prints its soft fd limit, THEN drains stdin (`cat >/dev/null`)
+        // so it behaves like a real one-shot inner that reads its request before
+        // exiting. Without the drain the shell exits immediately after `ulimit -n`,
+        // closing its stdin read-end; the proxy's `write_all(request)` then races
+        // that close and, on Linux, loses — surfacing as a broken-pipe write error
+        // (cli.rs `run` propagates a genuine stdin write failure) instead of the
+        // captured "48". Draining stdin keeps the read-end open until the proxy's
+        // write lands, making the EFFECT assertion deterministic on every platform.
+        let cmd = args(&["/bin/sh", "-c", "ulimit -n; cat >/dev/null"]);
         let inner = SubprocessInner::new(&cmd, launch).expect("construct");
         let seen = String::from_utf8(inner.dispatch(b"{}")).expect("utf8");
         assert_eq!(
@@ -3522,8 +3531,13 @@ mod tests {
 
     // --- #3865 inner-server OS sandbox profile (CLI parsing + fail-closed gate) ---
     //
-    // These run on darwin: the enforce gate fires here because no kernel backend
-    // ships in this build, so the fail-closed property is directly testable.
+    // The enforce gate's outcome is platform/kernel dependent: on darwin (and any
+    // Linux kernel without Landlock at the required ABI) no kernel backend can
+    // enforce, so requesting `enforce` MUST fail closed; on a Linux kernel that
+    // CAN enforce, construction succeeds and the backend is installed at spawn.
+    // The tests below assert the correct branch by consulting the SAME runtime
+    // capability probe the production gate uses (`backend_can_enforce`), so they
+    // hold on every runner (darwin dev, Linux CI with or without Landlock).
 
     #[test]
     fn sandbox_defaults_off_and_deny_all() {
@@ -3545,24 +3559,43 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_enforce_fails_closed_on_this_platform() {
-        // The load-bearing honesty gate: requesting enforcement with no kernel
-        // backend (darwin / this build) MUST refuse to start at construction time.
-        // The gate is exercised through SubprocessInner::new (startup validation),
-        // the same path main.rs takes before any inner server is spawned.
+    fn sandbox_enforce_gate_matches_backend_capability() {
+        // The load-bearing honesty gate, asserted against the SAME runtime probe
+        // the production path uses (`SandboxProfile::backend_can_enforce`): where
+        // no kernel backend can enforce (darwin, or a Linux kernel without
+        // Landlock), `enforce` MUST refuse to start at construction time; where the
+        // kernel CAN enforce (Linux + Landlock at the required ABI), construction
+        // succeeds and the backend is installed lazily at spawn. The gate is
+        // exercised through SubprocessInner::new (startup validation), the same
+        // path main.rs takes before any inner server is spawned.
         let mut a = minimal();
         a.splice(0..0, args(&["--inner-sandbox", "enforce"]));
         let config = parse_args(&a).expect("flags parse; the gate fires at construction");
         assert_eq!(config.inner_launch.sandbox.mode, SandboxMode::Enforce);
-        // Match rather than `.expect_err` so the assertion does not require
-        // `SubprocessInner: Debug` (the Ok value is never printed here).
-        let err = match SubprocessInner::new(&config.inner_command, config.inner_launch.clone()) {
-            Ok(_) => panic!("enforce without a kernel backend must fail closed before spawn"),
-            Err(e) => e,
-        };
-        assert!(err.contains("enforce"), "got: {err}");
-        assert!(err.contains("refusing to start"), "got: {err}");
-        assert!(err.contains("#3865"), "error must point at the follow-up: {err}");
+
+        let result = SubprocessInner::new(&config.inner_command, config.inner_launch.clone());
+        if SandboxProfile::backend_can_enforce() {
+            // A platform/kernel that CAN enforce: construction must succeed (the
+            // Landlock ruleset + seccomp filter install as a pre_exec hook later).
+            assert!(
+                result.is_ok(),
+                "enforce must construct where the kernel backend can enforce"
+            );
+        } else {
+            // No kernel backend: the gate MUST fail closed BEFORE any spawn. Match
+            // rather than `.expect_err` so the assertion does not require
+            // `SubprocessInner: Debug` (the Ok value is never printed here).
+            let err = match result {
+                Ok(_) => panic!("enforce without a kernel backend must fail closed before spawn"),
+                Err(e) => e,
+            };
+            assert!(err.contains("enforce"), "got: {err}");
+            assert!(err.contains("refusing to start"), "got: {err}");
+            assert!(
+                err.contains("#3865"),
+                "error must point at the follow-up: {err}"
+            );
+        }
     }
 
     #[test]
