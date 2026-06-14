@@ -94,6 +94,10 @@ online_ocsp = []
 [dev-dependencies]
 # In-process test cert generation for the mTLS round-trip tests.
 rcgen = { workspace = true }
+# Mints the signed OCSP fixtures in the `online_ocsp` module's in-tree tests
+# (the Bazel ocsp test target wires this same crate); a dev-dep so the ocsp unit
+# tests build + run under `cargo test --features online_ocsp`, not only Bazel.
+ed25519-dalek = { workspace = true }
 # The proxy's integration tests drive the host-side signer end to end.
 mcps-host = { path = "../mcps-host" }
 # Resolve child-process binary paths under Bazel runfiles OR plain cargo.

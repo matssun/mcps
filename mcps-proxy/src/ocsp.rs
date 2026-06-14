@@ -464,11 +464,98 @@ fn host_is_public(host: &str) -> bool {
         return false;
     }
     match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(v4)) => ipv4_is_public(&v4),
-        Ok(IpAddr::V6(v6)) => ipv6_is_public(&v6),
-        // Not a literal IP: a real hostname (the OS resolves it at fetch time).
-        Err(_) => true,
+        Ok(IpAddr::V4(v4)) => return ipv4_is_public(&v4),
+        Ok(IpAddr::V6(v6)) => return ipv6_is_public(&v6),
+        // Not a STRICT dotted-decimal / canonical IPv6 literal — fall through.
+        Err(_) => {}
     }
+    // SSRF hardening (#26): an attacker-influenced host may encode an IPv4 address
+    // in a non-dotted-decimal form that std's strict parser REJECTS but
+    // `inet_aton(3)` — and therefore the OS resolver / HTTP client at fetch time —
+    // ACCEPTS: octal (`0177.0.0.1`), hex (`0x7f.0.0.1`), a 32-bit integer
+    // (`2130706433`), or short forms (`127.1`). Without canonicalizing these they
+    // would slip past the dotted-decimal block as if they were hostnames and the
+    // fetch would still reach the internal address. Canonicalize and re-check; only
+    // a host that is NOT any IPv4 encoding is treated as a real hostname.
+    if let Some(v4) = parse_inet_aton_ipv4(host) {
+        return ipv4_is_public(&v4);
+    }
+    true
+}
+
+/// Parse an IPv4 address in the LOOSE `inet_aton(3)` forms that std's strict
+/// parser rejects but the OS resolver / HTTP clients accept (issue #26 SSRF
+/// guard). Each of 1–4 dot-separated parts may be decimal, octal (leading `0`), or
+/// hexadecimal (leading `0x`/`0X`); with fewer than 4 parts the final part is a
+/// wider field that absorbs the remaining low-order bytes (`a`; `a.b`; `a.b.c`).
+/// Returns the canonical address, or `None` if `host` is not such a form (e.g. a
+/// real hostname). Pure.
+fn parse_inet_aton_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
+    if host.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() > 4 {
+        return None;
+    }
+    let vals: Vec<u64> = parts
+        .iter()
+        .map(|p| parse_inet_aton_part(p))
+        .collect::<Option<Vec<u64>>>()?;
+    let n = vals.len();
+    // Every part EXCEPT the last is a single byte (≤ 255).
+    if vals[..n - 1].iter().any(|v| *v > 0xff) {
+        return None;
+    }
+    // The last part is a "rest" field whose width depends on how many parts there
+    // are; reject it if it overflows that width.
+    let last = vals[n - 1];
+    let max_last: u64 = match n {
+        1 => 0xffff_ffff,
+        2 => 0x00ff_ffff,
+        3 => 0x0000_ffff,
+        4 => 0x0000_00ff,
+        _ => return None,
+    };
+    if last > max_last {
+        return None;
+    }
+    let addr: u32 = match n {
+        1 => last as u32,
+        2 => ((vals[0] as u32) << 24) | last as u32,
+        3 => ((vals[0] as u32) << 24) | ((vals[1] as u32) << 16) | last as u32,
+        4 => {
+            ((vals[0] as u32) << 24)
+                | ((vals[1] as u32) << 16)
+                | ((vals[2] as u32) << 8)
+                | last as u32
+        }
+        _ => return None,
+    };
+    Some(std::net::Ipv4Addr::from(addr))
+}
+
+/// Parse one `inet_aton(3)` numeric part: hex (`0x..`), octal (leading `0`), or
+/// decimal. Returns `None` for an empty or non-numeric part (so a real hostname
+/// label like `ocsp` makes the whole parse fail and the host is treated as a name).
+fn parse_inet_aton_part(part: &str) -> Option<u64> {
+    let (radix, digits) =
+        if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+            (16, hex)
+        } else if part.len() > 1 && part.starts_with('0') {
+            (8, &part[1..])
+        } else {
+            (10, part)
+        };
+    if digits.is_empty() {
+        return None;
+    }
+    // Reject any non-digit (incl. a leading sign) up front: `from_str_radix`
+    // tolerates a leading `+`, which `inet_aton` does not.
+    if !digits.bytes().all(|b| (b as char).is_digit(radix)) {
+        return None;
+    }
+    u64::from_str_radix(digits, radix).ok()
 }
 
 /// Whether an IPv4 literal is a PUBLIC (fetchable) address — i.e. NOT loopback
@@ -1692,6 +1779,82 @@ mod tests {
                 "{url:?} resolves to a non-public address and must be blocked"
             );
         }
+    }
+
+    /// Issue #26: the SSRF guard must block NON-dotted-decimal IP encodings that
+    /// `inet_aton(3)` (and thus the OS resolver / HTTP client) resolves to the same
+    /// internal addresses — octal, hex, 32-bit integer, and short forms. Without
+    /// canonicalization these slip past the dotted-decimal block as "hostnames".
+    #[test]
+    fn aia_guard_blocks_alternate_ip_encodings() {
+        for url in [
+            // 127.0.0.1 (loopback) in every alternate encoding.
+            "http://0177.0.0.1/", // octal first octet
+            "http://0x7f.0.0.1/", // hex first octet
+            "http://0x7f000001/", // single hex 32-bit
+            "http://2130706433/", // single decimal 32-bit
+            "http://127.1/",      // short form (a.b)
+            "http://127.0.1/",    // short form (a.b.c)
+            // 169.254.169.254 (cloud metadata) alternate encodings.
+            "http://2852039166/",          // decimal 32-bit
+            "http://0xa9fea9fe/",          // hex 32-bit
+            "http://0251.0376.0251.0376/", // all-octal dotted
+            // 10.0.0.5 (RFC1918) as a 32-bit integer.
+            "http://167772165/",
+            // 0.0.0.0 (unspecified) as integer.
+            "http://0/",
+        ] {
+            assert!(
+                !aia_responder_url_is_safe(url),
+                "{url:?} canonicalizes to a non-public IP and must be blocked"
+            );
+        }
+    }
+
+    /// Positive control: a PUBLIC address in an alternate encoding must STILL be
+    /// allowed (the canonicalization must not over-block), and a genuine hostname
+    /// that merely looks numeric-ish is treated as a name, not mis-parsed.
+    #[test]
+    fn aia_guard_allows_public_alternate_encodings_and_hostnames() {
+        // 8.8.8.8 (public) as hex 32-bit and octal dotted — must pass.
+        assert!(aia_responder_url_is_safe("http://0x08080808/"));
+        // 8.8.8.8 in all-octal dotted form.
+        assert!(aia_responder_url_is_safe("http://010.010.010.010/"));
+        // A real hostname (non-numeric labels) is permitted at this layer.
+        assert!(aia_responder_url_is_safe("http://ocsp.example.com/"));
+    }
+
+    /// Unit-level proof that the loose parser canonicalizes each encoding to the
+    /// SAME address the dotted-decimal form denotes.
+    #[test]
+    fn inet_aton_parser_canonicalizes_each_encoding() {
+        use std::net::Ipv4Addr;
+        let loopback = Ipv4Addr::new(127, 0, 0, 1);
+        for form in [
+            "0177.0.0.1",
+            "0x7f.0.0.1",
+            "0x7f000001",
+            "2130706433",
+            "127.1",
+            "127.0.1",
+        ] {
+            assert_eq!(
+                super::parse_inet_aton_ipv4(form),
+                Some(loopback),
+                "{form:?} must canonicalize to 127.0.0.1"
+            );
+        }
+        assert_eq!(
+            super::parse_inet_aton_ipv4("2852039166"),
+            Some(Ipv4Addr::new(169, 254, 169, 254)),
+            "the cloud-metadata integer must canonicalize correctly"
+        );
+        // Non-IP hostnames and malformed numeric forms are NOT parsed as IPs.
+        assert_eq!(super::parse_inet_aton_ipv4("ocsp.example.com"), None);
+        assert_eq!(super::parse_inet_aton_ipv4("0x"), None); // empty hex digits
+        assert_eq!(super::parse_inet_aton_ipv4("256.0.0.1"), None); // octet overflow
+        assert_eq!(super::parse_inet_aton_ipv4("1.2.3.4.5"), None); // too many parts
+        assert_eq!(super::parse_inet_aton_ipv4("4294967296"), None); // > u32::MAX
     }
 
     /// The scheme allowlist (applied to BOTH cert AIA and operator override) admits

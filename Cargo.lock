@@ -739,6 +739,7 @@ dependencies = [
  "asn1-rs",
  "cryptoki-sys",
  "der",
+ "ed25519-dalek",
  "getrandom 0.2.17",
  "landlock",
  "libc",
