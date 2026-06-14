@@ -264,13 +264,21 @@ pub struct EnvKeySource {
 
 #[cfg(feature = "dev_env_key_source")]
 impl EnvKeySource {
-    /// Read an env var's value, then REMOVE the var from the process environment
-    /// (defense in depth: shrink the window in which the secret is inheritable by
-    /// children / visible via `/proc/<pid>/environ`). The value is returned in
-    /// [`zeroize::Zeroizing`] so it is scrubbed when the caller drops it.
+    /// Read an env var's value, returned in [`zeroize::Zeroizing`] so it is
+    /// scrubbed when the caller drops it.
+    ///
+    /// This does NOT mutate the process environment (issue #25). `std::env::remove_var`
+    /// is unsound in a multi-threaded program — the standard library now documents
+    /// it as `unsafe` for exactly this reason (a concurrent `getenv`/`setenv` in
+    /// another thread is a data race). Child-process secret isolation is NOT this
+    /// function's job and never relied on the global removal: the inner server is
+    /// launched with [`crate::inner_launch::InnerLaunchConfig`], which by default
+    /// inherits NO environment and passes only an explicit allowlist, so a key in
+    /// the proxy's own env is never forwarded regardless of whether it is removed
+    /// here. (`EnvKeySource` is `dev_env_key_source`-gated — dev/CI only — and a
+    /// production deployment uses a file/PKCS#11 source.)
     fn read(&self, var: &str) -> Result<Zeroizing<String>, KeyError> {
         let value = std::env::var(var).map_err(|_| KeyError::NotFound(format!("env var {var}")))?;
-        std::env::remove_var(var);
         Ok(Zeroizing::new(value))
     }
 

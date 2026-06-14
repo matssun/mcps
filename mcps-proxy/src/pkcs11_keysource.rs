@@ -175,11 +175,18 @@ impl<S> AmortizedSession<S> {
                 // (or a second transient failure) fails closed.
                 *guard = None;
                 let session = factory.open_logged_in()?;
-                let retry = op(&session);
-                *guard = Some(session);
-                match retry {
-                    Ok(value) => Ok(value),
+                // Cache the fresh session ONLY if the retried op SUCCEEDS (issue
+                // #25). A session whose op returned Fatal or SessionInvalid must
+                // NOT be cached — leaving the cache empty so the next call re-opens
+                // a clean session — otherwise a dead/invalid handle would be reused
+                // and every subsequent op would fail until eviction.
+                match op(&session) {
+                    Ok(value) => {
+                        *guard = Some(session);
+                        Ok(value)
+                    }
                     Err(SessionOpError::Fatal(e)) | Err(SessionOpError::SessionInvalid(e)) => {
+                        // `guard` stays None; `session` is dropped (closed) here.
                         Err(e)
                     }
                 }
@@ -707,6 +714,50 @@ mod tests {
         assert!(
             matches!(result, Err(KeyError::NotFound(_))),
             "a failed re-open after invalidation must surface the re-open error"
+        );
+    }
+
+    /// Issue #25: if the single re-open-and-retry ALSO fails (here, Fatal), the
+    /// freshly-opened session must NOT be cached — a session whose op failed must
+    /// never be reused. The proof: a SUBSEQUENT op must re-open (a fresh login and
+    /// generation), which it can only do if the failed-retry session was dropped
+    /// rather than cached.
+    #[test]
+    fn failed_retry_does_not_cache_the_session() {
+        let factory = CountingFactory::new();
+        let amortized: AmortizedSession<FakeSession> = AmortizedSession::new();
+
+        // Op A: open gen-1; first attempt SessionInvalid → re-open gen-2; the retry
+        // returns Fatal. Two logins so far. gen-2 must NOT be cached.
+        let attempt = Cell::new(0u32);
+        let result: Result<(), KeyError> = amortized.with_session(&factory, |_s| {
+            let n = attempt.replace(attempt.get() + 1);
+            if n == 0 {
+                Err(SessionOpError::SessionInvalid(KeyError::NotFound(
+                    "fake: session handle invalid".to_string(),
+                )))
+            } else {
+                Err(SessionOpError::Fatal(KeyError::Malformed(
+                    "fake: retry also fails".to_string(),
+                )))
+            }
+        });
+        assert!(matches!(result, Err(KeyError::Malformed(_))));
+        assert_eq!(factory.logins.get(), 2, "initial open + one re-open");
+
+        // Op B: because the failed-retry session was NOT cached, the cache is empty
+        // and this op must open a THIRD session — proving no dead handle was reused.
+        let gen = amortized
+            .with_session(&factory, |s| Ok::<u32, SessionOpError>(s.generation))
+            .expect("subsequent op succeeds on a freshly opened session");
+        assert_eq!(
+            factory.logins.get(),
+            3,
+            "the failed-retry session must not be cached; the next op must re-open"
+        );
+        assert_eq!(
+            gen, 3,
+            "the next op must run on a freshly opened session, not the failed one"
         );
     }
 }

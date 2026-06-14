@@ -289,12 +289,85 @@ impl InnerLaunchConfig {
     }
 
     /// The CONTROLLED default working directory used when `working_dir` is unset:
-    /// the system temp directory, NOT the proxy's own current directory. This is
-    /// deliberate — silently inheriting the proxy's cwd would expose whatever the
-    /// operator happened to launch the proxy from (config, keys, source tree).
-    /// It is a controlled starting point, not a sandbox.
+    /// a PRIVATE per-proxy subdirectory of the system temp dir, NOT the proxy's own
+    /// current directory and NOT the world-writable temp dir itself (issue #25).
+    ///
+    /// Two deliberate properties: (1) it is not the proxy's cwd — silently
+    /// inheriting that would expose whatever the operator launched from (config,
+    /// keys, source tree); (2) it is not bare `$TMPDIR`, which is world-writable.
+    /// This returns the intended PATH only; [`InnerLaunchConfig::apply_working_dir`]
+    /// creates it `0700` and validates ownership/permissions before use.
     pub fn default_working_dir() -> String {
-        std::env::temp_dir().to_string_lossy().into_owned()
+        std::env::temp_dir()
+            .join(format!("mcps-inner-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Create (or validate) the private default inner working directory, returning
+    /// its path or a fail-closed error (issue #25). Unlike bare `$TMPDIR`
+    /// (world-writable), this is a per-proxy `0700` directory owned by the proxy,
+    /// so the inner server's default cwd is never a world-writable starting point.
+    ///
+    /// A pre-existing path at this name is accepted ONLY if it is a real directory
+    /// (not a symlink), owned by the current uid, with no group/other access — so a
+    /// predictable-name squat (an attacker-planted symlink or loose-perms dir)
+    /// fails closed rather than being adopted as the inner's cwd.
+    #[cfg(unix)]
+    fn ensure_private_default_working_dir() -> Result<String, String> {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::MetadataExt;
+
+        let path = std::env::temp_dir().join(format!("mcps-inner-{}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            // Freshly created: 0700 and owned by us by construction.
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Validate the pre-existing path WITHOUT following symlinks.
+                let meta = std::fs::symlink_metadata(&path).map_err(|e| {
+                    format!("inner working dir {}: cannot stat ({e})", path.display())
+                })?;
+                if !meta.file_type().is_dir() {
+                    return Err(format!(
+                        "inner working dir {}: exists but is not a directory \
+                         (symlink/file squat?) — refusing",
+                        path.display()
+                    ));
+                }
+                // SAFETY: `getuid` reads the caller's real uid; it has no
+                // preconditions and cannot fail or cause UB.
+                let our_uid = unsafe { libc::getuid() };
+                if meta.uid() != our_uid {
+                    return Err(format!(
+                        "inner working dir {}: not owned by this process — refusing",
+                        path.display()
+                    ));
+                }
+                if meta.mode() & 0o077 != 0 {
+                    return Err(format!(
+                        "inner working dir {}: permissions are not private (0700 required) — refusing",
+                        path.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "inner working dir {}: cannot create ({e})",
+                    path.display()
+                ));
+            }
+        }
+        Ok(path.to_string_lossy().into_owned())
+    }
+
+    /// Non-Unix fallback: create the private default working dir best-effort
+    /// (per-platform permission models differ; the Unix path enforces `0700`).
+    #[cfg(not(unix))]
+    fn ensure_private_default_working_dir() -> Result<String, String> {
+        let path = std::env::temp_dir().join(format!("mcps-inner-{}", std::process::id()));
+        std::fs::create_dir_all(&path)
+            .map_err(|e| format!("inner working dir {}: cannot create ({e})", path.display()))?;
+        Ok(path.to_string_lossy().into_owned())
     }
 
     /// The effective working directory: the explicit one if set, else the
@@ -363,19 +436,27 @@ impl InnerLaunchConfig {
     }
 
     /// Apply the working-directory policy to a child `Command`: always set an
-    /// EXPLICIT current directory (the effective working dir), so the inner
-    /// server never silently inherits the proxy's cwd.
+    /// EXPLICIT current directory, so the inner server never silently inherits the
+    /// proxy's cwd.
     ///
-    /// Fails closed if the chosen directory is not an existing directory — a
-    /// configured working dir that cannot be honored is an error, not a silent
-    /// fall-back to the proxy's cwd.
+    /// * An EXPLICITLY configured `working_dir` must already exist as a directory —
+    ///   it is validated and used as-is, never created here (fails closed if it
+    ///   cannot be honored, rather than silently falling back to the proxy's cwd).
+    /// * With NO configured `working_dir`, the private per-proxy default is created
+    ///   `0700` and ownership/permission-validated (issue #25) — never the
+    ///   world-writable bare temp dir.
     pub fn apply_working_dir(&self, command: &mut Command) -> Result<(), String> {
-        let dir = self.effective_working_dir();
-        let meta = std::fs::metadata(&dir)
-            .map_err(|e| format!("--inner-working-dir {dir}: cannot stat ({e})"))?;
-        if !meta.is_dir() {
-            return Err(format!("--inner-working-dir {dir}: not a directory"));
-        }
+        let dir = match &self.working_dir {
+            Some(explicit) => {
+                let meta = std::fs::metadata(explicit)
+                    .map_err(|e| format!("--inner-working-dir {explicit}: cannot stat ({e})"))?;
+                if !meta.is_dir() {
+                    return Err(format!("--inner-working-dir {explicit}: not a directory"));
+                }
+                explicit.clone()
+            }
+            None => Self::ensure_private_default_working_dir()?,
+        };
         command.current_dir(&dir);
         Ok(())
     }
@@ -539,32 +620,74 @@ impl InnerLaunchConfig {
 /// fd 3 in the forked child (M15, #4080). Separated out as a plain `fn` so the
 /// `pre_exec` closure is a single function pointer with no captured state.
 ///
-/// Async-signal-safe: it calls only `getrlimit`/`sysconf` for the upper bound and
-/// `close(2)` over the numeric range — no allocation, no locks, no Rust runtime.
-/// `EBADF` (closing an fd that is not open) is the expected common case and is
-/// ignored; any OTHER `close` error fails the spawn (returned as an `io::Error`),
-/// so the inner is never `exec`'d with descriptors still leaking. Returns
-/// `io::Result<()>` as `pre_exec` requires.
+/// Primary mechanism (issue #25): the Linux `close_range(2)` syscall closes EVERY
+/// descriptor from fd 3 up in one call, regardless of `RLIMIT_NOFILE`. This is
+/// robust against a lowered soft limit (the `setrlimit` hook runs first in the
+/// chain) and against descriptors above any numeric cap — both of which the old
+/// `getrlimit`-bounded loop could miss. We invoke it via `syscall(2)` rather than
+/// the glibc `close_range` wrapper to avoid a glibc-version symbol dependency; the
+/// kernel returns `ENOSYS` on <5.9, in which case we fall back to the bounded
+/// loop. Any OTHER `close_range` error means descriptors may still be open, so the
+/// spawn FAILS (the inner is never `exec`'d leaking fds).
+///
+/// Async-signal-safe: only `syscall`/`getrlimit`/`close(2)` — no allocation,
+/// locks, or Rust runtime. Returns `io::Result<()>` as `pre_exec` requires.
 fn close_fds_above_stdio() -> std::io::Result<()> {
-    // The highest fd we might need to close. Prefer the process's soft
-    // RLIMIT_NOFILE (the kernel's own cap on open fds); fall back to a sane
-    // constant if it cannot be read. Clamp to a bound so a pathological "infinity"
-    // soft limit cannot make this loop run for an unreasonable time.
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `SYS_close_range` is a single syscall taking three integer
+        // arguments; it reads no userspace memory and touches no Rust state, so it
+        // is async-signal-safe and valid in the post-fork/pre-exec child. Closing
+        // the full [3, u32::MAX] range is exactly the documented "close everything
+        // past stderr" idiom.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3 as libc::c_uint,
+                libc::c_uint::MAX,
+                0 as libc::c_uint,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        // ENOSYS (kernel < 5.9): close_range is unavailable — fall through to the
+        // bounded loop. Any other error means fds may still be open: fail closed.
+        if err.raw_os_error() != Some(libc::ENOSYS) {
+            return Err(err);
+        }
+    }
+    close_fds_above_stdio_loop()
+}
+
+/// Bounded `close(2)` loop fallback for [`close_fds_above_stdio`] — used on Linux
+/// kernels without `close_range` (<5.9) and on non-Linux platforms.
+///
+/// Upper bound: the process's HARD `RLIMIT_NOFILE` (`rlim_max`), NOT the soft
+/// limit — the `setrlimit` hook lowers the SOFT limit earlier in the pre-`exec`
+/// chain, and bounding on the lowered soft value could skip a higher-numbered
+/// inherited descriptor (issue #25). The hard limit is clamped to `HARD_CAP_FD` so
+/// a pathological "infinity" hard limit cannot make the loop run unreasonably long;
+/// this residual cap is the justified bound for the fallback path only (the
+/// primary `close_range` path has no such cap). `EBADF` (an unopened fd in the
+/// range) is expected and ignored; any other error fails the spawn.
+fn close_fds_above_stdio_loop() -> std::io::Result<()> {
     const FALLBACK_MAX_FD: libc::c_int = 1024;
     const HARD_CAP_FD: libc::c_int = 65_536;
 
     // SAFETY: `getrlimit` writes a single `rlimit` struct we provide; reading the
-    // current soft limit has no other effect.
+    // hard limit has no other effect.
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
     };
     let max_fd: libc::c_int = unsafe {
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur > 0 {
-            // rlim_cur is the count of fds; the highest valid fd is one less, but
-            // closing up to the count (inclusive) is harmless (extra EBADFs).
-            let cur = limit.rlim_cur.min(HARD_CAP_FD as u64);
-            cur as libc::c_int
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_max > 0 {
+            // Use the HARD limit (rlim_max): the soft limit may have been lowered
+            // by the setrlimit hook, so bounding on it could skip a high inherited
+            // fd. Clamp so an "infinity" hard limit cannot run the loop forever.
+            limit.rlim_max.min(HARD_CAP_FD as u64) as libc::c_int
         } else {
             FALLBACK_MAX_FD
         }
@@ -651,6 +774,35 @@ mod tests {
             .apply_working_dir(&mut command)
             .expect_err("a configured working dir that cannot be honored must fail closed");
         assert!(err.contains("MCPS036"), "got: {err}");
+    }
+
+    /// Issue #25: with NO configured working dir, `apply_working_dir` must create
+    /// the private default as a `0700` directory (not the world-writable bare temp
+    /// dir), so the inner server's default cwd is non-world-writable.
+    #[cfg(unix)]
+    #[test]
+    fn default_working_dir_is_created_private_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let config = InnerLaunchConfig::new(); // working_dir is None
+        let mut command = std::process::Command::new("/bin/true");
+        config
+            .apply_working_dir(&mut command)
+            .expect("default working dir must be created and applied");
+
+        let dir = InnerLaunchConfig::default_working_dir();
+        let meta = std::fs::metadata(&dir).expect("default working dir exists after apply");
+        assert!(meta.is_dir(), "default working dir must be a directory");
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o700,
+            "default inner working dir must be private 0700, not world-writable"
+        );
+        // It is also NOT the bare (world-writable) temp dir itself.
+        assert_ne!(
+            dir,
+            std::env::temp_dir().to_string_lossy(),
+            "default must be a private subdir, not bare $TMPDIR"
+        );
     }
 
     #[test]

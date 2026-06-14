@@ -5,8 +5,10 @@
 //! skips it). It proves the dev-only behaviors that cannot even compile in a
 //! production build:
 //!
-//!   * `EnvKeySource` reads the seed and REMOVES the env var after read (defense
-//!     in depth — the var is unset post-read), and the loaded key signs correctly;
+//!   * `EnvKeySource` reads the seed WITHOUT mutating the process environment
+//!     (issue #25: `std::env::remove_var` is unsound under threads; child-process
+//!     secret isolation is handled by the inner-launch env policy, not global
+//!     removal), and the loaded key signs correctly;
 //!   * a `KeyError` from a malformed seed never carries the secret bytes;
 //!   * dropping a `zeroize::Zeroizing<T>` invokes `Zeroize::zeroize` on its
 //!     payload, and `zeroize()` zeros the bytes in place — both machine-verified
@@ -26,11 +28,14 @@ fn expected_pubkey() -> String {
     SigningKey::from_seed_bytes(&SEED).public_key().to_b64url()
 }
 
-/// EFFECT test: the dev-only env source loads the seed, the loaded key signs
-/// (matches the seed's public key), AND the seed env var is REMOVED after the read
-/// — proving the defense-in-depth `std::env::remove_var` actually fired.
+/// EFFECT test: the dev-only env source loads the seed and the loaded key signs
+/// (its public key matches the seed's), WITHOUT mutating the process environment
+/// (issue #25). The previous behavior removed the var via the unsound
+/// `std::env::remove_var`; the read is now a pure read — the seed var REMAINS set,
+/// and child-process secret isolation is the inner-launch env policy's job (no env
+/// inheritance by default), not a global mutation here.
 #[test]
-fn env_source_signs_and_removes_var_after_read() {
+fn env_source_signs_without_mutating_process_env() {
     let seed_v = "MCPS076_SEED_AFTER_READ";
     let seed_b64 = b64url_encode(&SEED);
     std::env::set_var(seed_v, &seed_b64);
@@ -47,11 +52,13 @@ fn env_source_signs_and_removes_var_after_read() {
     // The loaded key actually signs (its public key matches the seed's).
     assert_eq!(key.public_key().to_b64url(), expected_pubkey());
 
-    // Defense in depth: the seed var is gone from the process environment.
+    // The read does NOT mutate the process environment: the var is still present
+    // (no unsound global `remove_var`).
     assert!(
-        std::env::var(seed_v).is_err(),
-        "EnvKeySource must remove the seed env var after reading it"
+        std::env::var(seed_v).is_ok(),
+        "EnvKeySource::read must not mutate the process environment"
     );
+    std::env::remove_var(seed_v); // test teardown only
 }
 
 /// The error from a malformed env-supplied seed must not contain the secret bytes
