@@ -44,15 +44,16 @@
         "authorization_audience_mismatch",
         "authorization_expired",
         "authorization_revoked",
-        "authorization_scope_denied"
+        "authorization_scope_denied",
+        "authorization_duplicate_key"
       ]
     }
   },
   "counts": {
     "comment": "Recorded counts. The guard re-derives each value from the on-disk fixtures and the enumerated lists above and FAILS on any mismatch — these cannot silently rot.",
     "core_vector_files": 21,
-    "authorization_vector_cases": 12,
-    "total_vectors": 33,
+    "authorization_vector_cases": 13,
+    "total_vectors": 34,
     "bazel_test_targets": 54
   },
   "bazel_test_targets": [
