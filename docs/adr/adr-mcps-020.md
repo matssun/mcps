@@ -267,7 +267,7 @@ error/timeout), the durable replication state of the just-written nonce is
    silent admit.
 2. **Never report `Fresh`** for the request after a shortfall. A shortfall is not a
    successful insert.
-3. **Not** attempt a compensating `DEL`/`UNLINK` of the primary key **by default**.
+3. **Not** attempt a compensating `DEL`/`UNLINK` of the primary key.
    The nonce **may be burned** on the primary (and may already have reached one or
    more replicas).
 4. Accept that the **same signed request with the same nonce is NOT guaranteed
