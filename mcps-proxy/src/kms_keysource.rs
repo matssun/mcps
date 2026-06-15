@@ -39,7 +39,7 @@ const ED25519_PUBLIC_KEY_LEN: usize = 32;
 /// AWS KMS `GetPublicKey` and GCP Cloud KMS both return the key in this exact form,
 /// so the 32 raw bytes are the tail after this prefix. Anything else (a different
 /// key type — RSA, NIST P-curve — or a malformed blob) is rejected.
-const ED25519_SPKI_PREFIX: [u8; 12] = [
+pub(crate) const ED25519_SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
 /// Total length of an RFC 8410 Ed25519 SPKI (prefix + raw point).
@@ -73,7 +73,9 @@ pub trait KmsEd25519Backend {
 /// id-Ed25519 (`1.3.101.112`), is rejected — the KMS key MUST be an Ed25519 key.
 /// This prevents silently treating an RSA / NIST-P-curve KMS key (a different,
 /// MCP-S-incompatible algorithm) as if it were Ed25519.
-fn ed25519_raw_point_from_spki(der: &[u8]) -> Result<[u8; ED25519_PUBLIC_KEY_LEN], KeyError> {
+pub(crate) fn ed25519_raw_point_from_spki(
+    der: &[u8],
+) -> Result<[u8; ED25519_PUBLIC_KEY_LEN], KeyError> {
     if der.len() != ED25519_SPKI_LEN || der[..ED25519_SPKI_PREFIX.len()] != ED25519_SPKI_PREFIX {
         return Err(KeyError::Malformed(format!(
             "kms: public key is not an RFC 8410 Ed25519 SubjectPublicKeyInfo (got {} bytes); the \

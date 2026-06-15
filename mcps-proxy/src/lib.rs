@@ -36,6 +36,14 @@
 // identity mode (per_node_keyset default | shared_remote_signer). The verifier-side
 // admission anchor; composes with `trust_cache::BoundedTrustCache` (ADR-MCPS-021).
 pub mod authorized_keyset;
+// ADR-MCPS-028 §B: native AWS KMS Ed25519 response signer over blocking HTTPS
+// (ureq) + a minimal audited SigV4 signer — NO async `aws-sdk-kms`/tokio/Smithy
+// (ADR-MCPS-018 lean-sync firewall). Compiled ONLY under the non-default
+// `aws_kms_keysource` feature so the default build links no HTTPS/SigV4 code.
+#[cfg(feature = "aws_kms_keysource")]
+pub mod aws_kms_keysource;
+#[cfg(feature = "aws_kms_keysource")]
+pub mod aws_sigv4;
 pub mod cli;
 // Issue #3838 (ADR-MCPS-014): a non-exporting reference `ResponseSigner` proving the
 // response-signing delegation seam — a backend whose key never leaves it can drive
@@ -104,6 +112,12 @@ pub use authorized_keyset::KeySetError;
 pub use authorized_keyset::KeySetTrustResolver;
 pub use authorized_keyset::KeyStatus;
 pub use authorized_keyset::ResponseSigningIdentityMode;
+// ADR-MCPS-028 §B: the AWS KMS Ed25519 backend (feature-gated). Drives the
+// `KmsResponseSigner` core via the `KmsEd25519Backend` seam.
+#[cfg(feature = "aws_kms_keysource")]
+pub use aws_kms_keysource::AwsKmsConfig;
+#[cfg(feature = "aws_kms_keysource")]
+pub use aws_kms_keysource::AwsKmsEd25519Backend;
 pub use delegated_response_signer::DelegatedResponseSigner;
 pub use durable_replay::DurableReplayCache;
 pub use inner_launch::BoundedStderr;

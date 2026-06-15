@@ -55,6 +55,24 @@ signature base64url-no-pad-encoded (identical wire form to every other signer).
 Ed25519 point, and constructs a `VerificationKey`. The KMS key MUST be
 `ECC_NIST_EDWARDS25519`; any other key spec fails closed at construction.
 
+**B.1 Transport — blocking `ureq` + a minimal audited SigV4 signer; NOT the AWS
+SDK** *(ratified 2026-06-15).* The adapter reaches KMS over blocking HTTPS (`ureq`,
+reusing the in-closure rustls/`ring` provider) and signs requests with a tiny,
+self-contained SigV4 implementation (HMAC-SHA256 over the in-closure RustCrypto
+primitives). The async `aws-sdk-kms` / `tokio` / Smithy stack is **forbidden** here:
+the ADR-MCPS-018 lean-closure / "all Phase-7 backends are SYNC, no async runtime"
+rule is a hard architectural constraint, and pulling tokio + a `block_on` bridge
+into this firewalled workspace would violate the shape of the system (the OCSP
+path's blocking-`ureq` precedent is the model). The client surface is deliberately
+TINY — only KMS `GetPublicKey` and `Sign`; no general KMS client, no encrypt/
+decrypt, no key-management or policy operations. Credentials are the explicit,
+narrow set (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / optional
+`AWS_SESSION_TOKEN` / explicit region / optional endpoint override); SDK-style
+credential discovery (profiles, IMDS, IRSA) is intentionally NOT provided. The SigV4
+signer is proven against AWS's published `get-vanilla` test vector, and EVERY
+KMS-returned signature is verified locally against the advertised public key (under
+the unmodified `mcps-core` verifier) before it is emitted.
+
 **C. Native GCP Cloud KMS `ResponseSigner`** (`GcpKmsKeySource`, feature
 `gcp_kms_keysource`). Signs via `asymmetricSign` against an `EC_SIGN_ED25519` key
 version (raw `data`, not `digest`); same raw-64-byte → base64url contract.

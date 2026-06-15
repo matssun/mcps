@@ -113,6 +113,12 @@ redis = { version = "0.27", default-features = false }
 # so declaring them direct pulls ZERO new crates. SHA-256 CertIDs (no SHA-1 dep).
 x509-ocsp = { version = "0.2", features = ["builder"] }
 ureq = { version = "2", default-features = false }
+# ADR-MCPS-028 (AWS KMS Ed25519 signer, feature `aws_kms_keysource`): SigV4 request
+# signing uses HMAC-SHA256 over RustCrypto primitives (sha2 is already in-closure),
+# NOT the async `aws-sdk-kms`/tokio/Smithy stack — the ADR-MCPS-018 lean-sync firewall
+# is a hard constraint. A pure, no-async crate; HTTPS transport reuses the blocking
+# `ureq` client (its `tls` feature is enabled only in mcps-proxy under that feature).
+hmac = "0.12"
 der = "0.7"
 spki = "0.7"
 x509-cert = "0.2"

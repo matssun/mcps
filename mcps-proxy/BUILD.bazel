@@ -14,6 +14,11 @@ _PROXY_LIB_SRCS = [
     # ADR-MCPS-022: explicit authorized server key-set + per-audience response-
     # signing identity mode (per_node_keyset / shared_remote_signer).
     "src/authorized_keyset.rs",
+    # ADR-MCPS-028 §B: native AWS KMS Ed25519 response signer (blocking ureq HTTPS +
+    # minimal audited SigV4; behind #[cfg(feature = "aws_kms_keysource")], cfg'd out
+    # of the default build). No async aws-sdk-kms/tokio (ADR-MCPS-018 lean-sync).
+    "src/aws_kms_keysource.rs",
+    "src/aws_sigv4.rs",
     "src/cli.rs",
     # Issue #3838 (ADR-MCPS-014): non-exporting reference ResponseSigner proving the
     # response-signing delegation seam. Always compiled; default-build, Bazel-tested.
@@ -21,6 +26,9 @@ _PROXY_LIB_SRCS = [
     "src/durable_replay.rs",
     "src/inner_launch.rs",
     "src/key_source.rs",
+    # ADR-MCPS-028: provider-agnostic cloud-KMS response signer core (the shared
+    # protocol mapping behind the #3838 delegation seam). Always compiled.
+    "src/kms_keysource.rs",
     "src/lib.rs",
     "src/persistent_inner.rs",
     "src/proxy.rs",
@@ -99,6 +107,10 @@ _PROXY_EXT_CRATES = [
     "@crates_mcps//:cryptoki-sys",
     "@crates_mcps//:redis",
     "@crates_mcps//:ureq",
+    # ADR-MCPS-028 §B: SigV4 HMAC-SHA256 + KMS standard-base64 message/signature
+    # encoding for the AWS KMS Ed25519 signer (feature aws_kms_keysource).
+    "@crates_mcps//:hmac",
+    "@crates_mcps//:base64",
     "@crates_mcps//:x509-ocsp",
     "@crates_mcps//:der",
     "@crates_mcps//:spki",
@@ -120,6 +132,8 @@ _PROXY_EXT_FEATURES = [
     "pkcs11_keysource",
     "redis_replay",
     "online_ocsp",
+    # ADR-MCPS-028 §B: native AWS KMS Ed25519 response signer.
+    "aws_kms_keysource",
 ]
 
 # MCPS-029 (folds in MCPS-018 #3807): the production sidecar CLI. Terminates TLS,

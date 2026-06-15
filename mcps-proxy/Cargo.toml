@@ -33,7 +33,18 @@ zeroize = { workspace = true }
 # (ADR-MCPS-018); only `:mcps_proxy_ext` and its tests link them.
 cryptoki-sys = { workspace = true }
 redis = { workspace = true }
-ureq = { workspace = true }
+# ureq is the blocking HTTP client for both the OCSP path (plain HTTP) and the AWS
+# KMS signer (HTTPS). The `tls` feature (rustls + webpki-roots) is what gives the
+# KMS adapter HTTPS; rustls/ring is already in the closure, so this reuses it and
+# pulls NO async runtime. Declared with the feature here (not in the workspace
+# default) so the OCSP-only closure is unchanged when `aws_kms_keysource` is off.
+ureq = { workspace = true, features = ["tls"] }
+# ADR-MCPS-028: HMAC-SHA256 for the AWS SigV4 signer. NON-optional (crate_universe
+# visibility); the SigV4/KMS code is behind `#[cfg(feature = "aws_kms_keysource")]`.
+hmac = { workspace = true }
+# ADR-MCPS-028: KMS wire-encodes the message + signature in STANDARD base64 (mcps
+# uses base64url elsewhere). Already in the lock via mcps-core, so this adds no crate.
+base64 = { workspace = true }
 x509-ocsp = { workspace = true }
 der = { workspace = true }
 spki = { workspace = true }
@@ -80,6 +91,12 @@ fault_accept_any_client = []
 # default `:mcps_proxy` Bazel target neither sets the flag nor links the crates.
 # #4034 PKCS#11-backed KeySource (response-signing key never leaves the token).
 pkcs11_keysource = []
+# ADR-MCPS-028 §B: native AWS KMS Ed25519 response signer. Blocking HTTPS via ureq
+# + an audited minimal SigV4 signer — intentionally NO `aws-sdk-kms`/tokio/Smithy
+# (ADR-MCPS-018 lean-sync firewall). Narrow surface: only KMS `GetPublicKey` +
+# `Sign` (ED25519_SHA_512 / MessageType RAW). OFF by default; the default
+# `:mcps_proxy` Bazel target neither sets the flag nor links the adapter.
+aws_kms_keysource = []
 # #4028 Redis-backed shared atomic ReplayCache (horizontal-scale replay safety).
 redis_replay = []
 # #4030 online OCSP / CRL-distribution-point client-cert revocation.
