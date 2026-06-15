@@ -162,16 +162,26 @@ jobs:
           # OpenSSL 3.x rejects it in responder mode ("Digest must be before
           # -cert or -serial"). The responder answers SHA-256 CertIDs (what the
           # Rust checker sends) without it.
+          # `-multi` forks worker processes so a single stalled/half-open
+          # connection cannot wedge the whole responder.
           nohup openssl ocsp -port 8888 -index index.txt -CA ca.crt \
-            -rkey ca.key -rsigner ca.crt -text > responder.log 2>&1 &
+            -rkey ca.key -rsigner ca.crt -text -multi 4 > responder.log 2>&1 &
+          # Functional readiness probe: query with the openssl OCSP CLIENT until it
+          # returns the known-good verdict. Unlike a bare TCP connect, this sends a
+          # COMPLETE request and closes cleanly — it never leaves a half-open
+          # connection that would block the responder before the Rust client's
+          # request. (-sha256 must precede -cert.)
+          ocsp_ok=
           for _ in $(seq 1 40); do
-            if (exec 3<>/dev/tcp/127.0.0.1/8888) 2>/dev/null; then exec 3>&-; break; fi
+            if openssl ocsp -CAfile ca.crt -issuer ca.crt -sha256 -cert good.crt \
+                 -url http://127.0.0.1:8888 2>/dev/null | grep -q "good.crt: good"; then
+              ocsp_ok=1; break
+            fi
             sleep 0.25
           done
-          if ! (exec 3<>/dev/tcp/127.0.0.1/8888) 2>/dev/null; then
-            echo "OCSP responder did not start; log:"; cat responder.log; exit 1
+          if [ -z "$ocsp_ok" ]; then
+            echo "OCSP responder did not become healthy; log:"; cat responder.log; exit 1
           fi
-          exec 3>&-
           for f in ca good revoked; do openssl x509 -in "$f.crt" -outform DER -out "$f.der"; done
           {
             echo "MCPS_TEST_OCSP_RESPONDER_URL=http://127.0.0.1:8888"
