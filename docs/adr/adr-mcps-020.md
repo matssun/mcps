@@ -250,7 +250,7 @@ amendment to this ADR; the v0.3 decision is recorded in **Amendment 1** below.
 ## Amendment 1 (2026-06-15): WAIT-quorum shortfall contract ratified — no compensating `DEL`/`UNLINK` in v0.3
 
 Amendment status: **Accepted (v0.3)** (this ratifies only the v0.3
-WAIT-quorum-shortfall contract point; the ADR overall remains Proposed / under
+WAIT-quorum shortfall contract point; the ADR overall remains Proposed / under
 review). Supersedes the "possible future / deferred" framing of the preceding
 section for the purpose of the v0.3 contract: the keep-the-nonce / fail-closed
 behavior is the **ratified v0.3 default**, and a compensating `DEL`/`UNLINK` is
