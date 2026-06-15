@@ -247,7 +247,7 @@ A compensating cleanup that trades this availability edge for added complexity
 (and a carefully-modelled, replica-state-aware delete) is a possible FUTURE
 amendment to this ADR; the v0.3 decision is recorded in **Amendment 1** below.
 
-## Amendment 1 (2026-06-15): WAIT-quorum-shortfall contract ratified — no compensating DEL in v0.3
+## Amendment 1 (2026-06-15): WAIT-quorum shortfall contract ratified — no compensating DEL in v0.3
 
 Status: **Accepted (v0.3)**. Supersedes the "possible future / deferred" framing of
 the preceding section for the purpose of the v0.3 contract: the keep-the-nonce /
