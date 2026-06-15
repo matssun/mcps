@@ -176,12 +176,22 @@ fn authority_of(url: &str) -> Result<String, KeyError> {
     let after_scheme = url.split("://").nth(1).ok_or_else(|| {
         KeyError::Malformed(format!("aws-kms: endpoint '{url}' is not scheme://host"))
     })?;
-    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+
+    let mut parts = after_scheme.splitn(2, '/');
+    let authority = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+
     if authority.is_empty() {
         return Err(KeyError::Malformed(format!(
             "aws-kms: endpoint '{url}' has no host"
         )));
     }
+    if !path.is_empty() {
+        return Err(KeyError::Malformed(format!(
+            "aws-kms: endpoint '{url}' must not include a path"
+        )));
+    }
+
     Ok(authority.to_string())
 }
 
