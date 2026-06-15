@@ -140,7 +140,8 @@ impl KmsHttpClient for UreqKmsClient {
             .set("Content-Type", KMS_CONTENT_TYPE)
             .set("X-Amz-Target", target)
             .set("X-Amz-Date", &signed.amz_date)
-            .set("Authorization", &signed.authorization);
+            .set("Authorization", &signed.authorization)
+            .timeout(std::time::Duration::from_secs(5));
         if let Some(token) = &signed.security_token {
             req = req.set("X-Amz-Security-Token", token);
         }
