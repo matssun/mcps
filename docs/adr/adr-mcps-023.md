@@ -4,7 +4,12 @@
 
 ## Status
 
-Proposed (v0.3 sketch — under review)
+Accepted (v0.3 — 2026-06-15). Both ingress modes are implemented in `mcps-proxy`:
+`end_to_end_mtls` via the pluggable `TransportBindingPolicy` (`ExactMatchBinding`
+/ `MappedBinding`, binding the verified mTLS peer to the request signer), and
+`trusted_ingress_asserted` via the hardened XFCC asserted-identity path
+(RFC2253-aware, cross-element-consistency and unterminated-quote fail-closed;
+issue #21). SEP-2243 routing headers remain untrusted in both modes (ADR-MCPS-025).
 
 ## Context
 

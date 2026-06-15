@@ -4,7 +4,13 @@
 
 ## Status
 
-Proposed (v0.3 sketch — under review)
+Accepted (v0.3 — 2026-06-15). The durability-tier contract is implemented in
+`mcps-proxy` (`replay_tier.rs`: `ReplayDurabilityTier` with `REDIS_ASYNC` /
+`REDIS_WAIT_QUORUM` / `LINEARIZABLE` / `SINGLE_STORE_FAIL_CLOSED`, the
+`meets_strict_production_minimum` gate and the per-tier `guarantee` string), and
+its WAIT-quorum-shortfall behavior is proven live against a primary+replica Redis
+(`redis_replay_e2e_test::wait_quorum_shortfall_and_recovery_against_a_replica`).
+Amendment 1 (below) ratifies the shortfall contract.
 
 ## Context
 

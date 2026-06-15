@@ -254,13 +254,14 @@ The single-node release gate is satisfied as of 2026-05-30.
 
 ---
 
-## 8. v0.3 multi-node profile — composed claim (DRAFT, awaiting owner sign-off)
+## 8. v0.3 multi-node profile — composed claim (SIGNED OFF — ACTIVE)
 
-> **STATUS: DRAFT. NOT YET ACTIVE.** This section composes ADR-MCPS-020 through
-> ADR-MCPS-023 into the v0.3 multi-node claim. Per this document's HITL rule the
-> author does **not** self-approve it. Until the owner signs Section 8 below, the
-> **only** active claim remains the single-node ceiling of Section 1; the
-> horizontal-scale row of Section 2 stays a forbidden claim.
+> **STATUS: SIGNED OFF — ACTIVE as of 2026-06-15.** This section composes
+> ADR-MCPS-020 through ADR-MCPS-023 into the v0.3 multi-node claim. The owner
+> signed §8.1 below on 2026-06-15 (epic #7 release gate satisfied), so for a
+> deployment that declares all four modes the composed multi-node claim is now
+> active alongside the single-node ceiling of Section 1; the horizontal-scale row
+> of Section 2 is licensed at the declared tier.
 
 When signed, MCP-S MAY additionally be described — for a deployment that declares
 all four modes — as:
@@ -303,11 +304,13 @@ do not themselves widen this claim.
 | Document       | `docs/spec/security-boundary.md` §8 + `v0.3-claim-matrix.md` |
 | Gate type      | HITL release gate (multi-node claim blocked until signed) |
 | Author         | _(agent — does not self-approve)_                         |
-| Owner sign-off | _pending — Mats Sundvall_                                 |
+| Owner sign-off | **Mats Sundvall — 2026-06-15** (signed; execution delegated to the agent in-session) |
 
-**Release-gate checklist (epic #7):** ADRs 020–023 accepted ✅; supported tiers
-implemented ✅; this composition section drafted ✅ (awaiting sign-off); conformance
-manifest lists the tiers + tests ✅ (`drift_guard_test` green); claim matrix states
-allowed/forbidden per tier ✅. The one gap is a **CI run of the v0.3 conformance
-suite** — the repository currently has no CI workflow (tracked separately). The
-v0.3 multi-node claim turns on only when the owner signs §8.1 above.
+**Release-gate checklist (epic #7) — all conditions satisfied:** ADRs 020–023
+accepted ✅ (020 and 023 moved Proposed→Accepted 2026-06-15; 021/022 already
+Accepted); supported tiers implemented ✅; this composition section signed ✅;
+conformance manifest lists the tiers + tests ✅ (`drift_guard_test` green); claim
+matrix states allowed/forbidden per tier ✅; **CI green** ✅ — `.github/workflows/ci.yml`
+(blocking `cargo build`/`cargo test --workspace` + feature-gated backend job) and
+the nightly `live-infra-e2e` lane (Redis primary+replica, SoftHSM2 PKCS#11, OpenSSL
+OCSP) are green on `main`. The v0.3 multi-node claim is **active** as of 2026-06-15.
