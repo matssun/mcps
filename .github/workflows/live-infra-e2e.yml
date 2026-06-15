@@ -199,3 +199,10 @@ jobs:
           --test redis_replay_e2e_test
           --test pkcs11_keysource_e2e_test
           --test ocsp_e2e_test
+
+      - name: Stop OpenSSL OCSP responder
+        if: always()
+        run: |
+          if [ -n "${MCPS_OCSP_RESPONDER_PID:-}" ]; then
+            kill "${MCPS_OCSP_RESPONDER_PID}" 2>/dev/null || true
+          fi
