@@ -65,6 +65,7 @@ jobs:
       - name: Start primary + replica Redis
         run: |
           set -euo pipefail
+          sudo systemctl stop redis-server 2>/dev/null || true
           redis-server --port 6379 --daemonize yes --save '' --appendonly no
           redis-server --port 6380 --daemonize yes --save '' --appendonly no \
             --replicaof 127.0.0.1 6379
