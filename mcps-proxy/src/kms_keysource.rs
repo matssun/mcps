@@ -106,11 +106,9 @@ impl ResponseSigner for KmsResponseSigner {
     fn sign_response(&self, preimage: &[u8]) -> Result<String, KeyError> {
         let signature = self.backend.sign_raw_ed25519(preimage)?;
         if signature.len() != ED25519_SIGNATURE_LEN {
-            // A wrong-length signature is intrinsic (a non-RAW/prehash algorithm,
-            // or a non-Ed25519 key) — fail closed, never emit it.
+            // A wrong-length signature is intrinsic (not a transient fault) — fail closed, never emit it.
             return Err(KeyError::Malformed(format!(
-                "kms: backend returned a {}-byte signature; expected {ED25519_SIGNATURE_LEN} (a \
-                 prehash/DIGEST or non-Ed25519 signing algorithm would do this)",
+                "kms: backend returned a {}-byte signature; expected {ED25519_SIGNATURE_LEN} (expected a raw Ed25519 signature)",
                 signature.len()
             )));
         }
