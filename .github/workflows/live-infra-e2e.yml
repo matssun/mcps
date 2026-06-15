@@ -14,8 +14,9 @@
 # so a change to the lane is self-verified without burdening unrelated PRs.
 #
 # Scope: Redis primary+replica (replay e2e + the #41 WAIT-quorum shortfall/recovery
-# proof of ADR-MCPS-020 Amendment 1) + SoftHSM2 (PKCS#11 signer e2e). The OCSP
-# responder lane is the remaining follow-up.
+# proof of ADR-MCPS-020 Amendment 1) + SoftHSM2 (PKCS#11 signer e2e) + an OpenSSL
+# OCSP responder (online_ocsp good/revoked revocation e2e, #46). All three v0.3
+# feature-gated backends now have live CI verification.
 name: live-infra e2e
 
 on:
@@ -119,11 +120,89 @@ jobs:
             echo "MCPS_TEST_PKCS11_KEY_LABEL=mcps-response-signing"
           } >> "$GITHUB_ENV"
 
-      # Run ONLY the two live-infra e2e binaries (avoids building cross-crate demo
-      # fixtures). MCPS_REQUIRE_LIVE_INFRA=1 turns a missing backend into a failure.
-      - name: Run live-infra e2e (Redis replay + PKCS#11 signer)
+      # Provision an INDEPENDENT OpenSSL test OCSP responder + a good/revoked leaf
+      # pair. This follows the recipe documented in mcps-proxy/tests/ocsp_e2e_test.rs,
+      # with CI-oriented adjustments for OpenSSL 3.x and GitHub Actions YAML (no heredoc).
+      # Readiness is polled (no blind sleep) and the responder is kept alive for the
+      # subsequent test step.
+      # and the responder is nohup'd so it survives into the test step.
+      - name: Provision OpenSSL OCSP responder
+        run: |
+          set -euo pipefail
+          workdir="$PWD/ocsp-fixtures"
+          mkdir -p "$workdir"
+          cd "$workdir"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt \
+            -subj "/CN=mcps-ocsp-test-ca" -days 2 -addext "keyUsage=keyCertSign,cRLSign"
+          : > index.txt; echo 01 > serial; echo 1000 > crlnumber
+          {
+            echo '[ ca ]'
+            echo 'default_ca = CA_default'
+            echo '[ CA_default ]'
+            echo 'new_certs_dir = .'
+            echo 'database = index.txt'
+            echo 'serial = serial'
+            echo 'certificate = ca.crt'
+            echo 'private_key = ca.key'
+            echo 'default_md = sha256'
+            echo 'default_days = 1'
+            echo 'policy = pol'
+            echo 'x509_extensions = leaf_ext'
+            echo '[ pol ]'
+            echo 'commonName = supplied'
+            echo '[ leaf_ext ]'
+            echo 'authorityInfoAccess = OCSP;URI:http://127.0.0.1:8888'
+          } > ca.cnf
+          for n in good revoked; do
+            openssl req -newkey rsa:2048 -nodes -keyout "$n.key" -out "$n.csr" -subj "/CN=$n.leaf"
+            openssl ca -batch -config ca.cnf -in "$n.csr" -out "$n.crt" -days 1
+          done
+          openssl ca -batch -config ca.cnf -revoke revoked.crt
+          # NB: -sha256 is a CLIENT-side CertID option, NOT a responder option —
+          # OpenSSL 3.x rejects it in responder mode ("Digest must be before
+          # -cert or -serial"). The responder answers SHA-256 CertIDs (what the
+          # Rust checker sends) without it.
+          # `-multi` forks worker processes so a single stalled/half-open
+          # connection cannot wedge the whole responder.
+          nohup openssl ocsp -port 8888 -index index.txt -CA ca.crt \
+            -rkey ca.key -rsigner ca.crt -text -multi 4 > responder.log 2>&1 &
+          # Functional readiness probe: query with the openssl OCSP CLIENT until it
+          # returns the known-good verdict. Unlike a bare TCP connect, this sends a
+          # COMPLETE request and closes cleanly — it never leaves a half-open
+          # connection that would block the responder before the Rust client's
+          # request. (-sha256 must precede -cert.)
+          ocsp_ok=
+          for _ in $(seq 1 40); do
+            if openssl ocsp -CAfile ca.crt -issuer ca.crt -sha256 -cert good.crt \
+                 -url http://127.0.0.1:8888 2>/dev/null | grep -q "good.crt: good"; then
+              ocsp_ok=1; break
+            fi
+            sleep 0.25
+          done
+          if [ -z "$ocsp_ok" ]; then
+            echo "OCSP responder did not become healthy; log:"; cat responder.log; exit 1
+          fi
+          for f in ca good revoked; do openssl x509 -in "$f.crt" -outform DER -out "$f.der"; done
+          {
+            echo "MCPS_TEST_OCSP_RESPONDER_URL=http://127.0.0.1:8888"
+            echo "MCPS_TEST_OCSP_ISSUER_DER=$workdir/ca.der"
+            echo "MCPS_TEST_OCSP_GOOD_DER=$workdir/good.der"
+            echo "MCPS_TEST_OCSP_REVOKED_DER=$workdir/revoked.der"
+          } >> "$GITHUB_ENV"
+
+      # Run the live-infra e2e binaries (avoids building cross-crate demo fixtures).
+      # MCPS_REQUIRE_LIVE_INFRA=1 turns a missing backend into a failure.
+      - name: Run live-infra e2e (Redis replay + PKCS#11 signer + OCSP revocation)
         run: >-
           cargo test -p mcps-proxy
-          --features redis_replay,pkcs11_keysource
+          --features redis_replay,pkcs11_keysource,online_ocsp
           --test redis_replay_e2e_test
           --test pkcs11_keysource_e2e_test
+          --test ocsp_e2e_test
+
+      - name: Stop OpenSSL OCSP responder
+        if: always()
+        run: |
+          if [ -n "${MCPS_OCSP_RESPONDER_PID:-}" ]; then
+            kill "${MCPS_OCSP_RESPONDER_PID}" 2>/dev/null || true
+          fi
