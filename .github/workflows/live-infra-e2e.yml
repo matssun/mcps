@@ -74,8 +74,16 @@ jobs:
           mkdir -p "$PWD/softhsm-tokens"
           printf 'directories.tokendir = %s/softhsm-tokens\n' "$PWD" > "$SOFTHSM2_CONF"
           softhsm2-util --init-token --free --label mcps-test --so-pin 0000 --pin 1234
-          MODULE="$(dpkg -L softhsm2 | grep -m1 'libsofthsm2\.so')"
+          # Resolve the provider module WITHOUT a pipe: `dpkg -L … | grep -m1`
+          # trips `set -o pipefail` because grep closes the pipe early and dpkg
+          # dies with SIGPIPE. Prefer the well-known path, else a single `find`
+          # (`-print -quit` stops itself — no pipe, no SIGPIPE).
+          MODULE=/usr/lib/softhsm/libsofthsm2.so
+          if [ ! -e "$MODULE" ]; then
+            MODULE="$(find /usr/lib /usr/lib64 -name 'libsofthsm2.so' -print -quit 2>/dev/null)"
+          fi
           test -n "$MODULE" && test -e "$MODULE"
+          echo "Using PKCS#11 module: $MODULE"
           # Address the token by label (robust; no slot-id parsing).
           pkcs11-tool --module "$MODULE" --token-label mcps-test \
             --login --pin 1234 \
