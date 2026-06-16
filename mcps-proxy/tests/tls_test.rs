@@ -119,7 +119,9 @@ fn make_leaf_with_validity(
     } else {
         ExtendedKeyUsagePurpose::ServerAuth
     }];
-    let cert = params.signed_by(&key, &ca.cert, &ca.key).expect("leaf signed");
+    let cert = params
+        .signed_by(&key, &ca.cert, &ca.key)
+        .expect("leaf signed");
     let der = cert.der().clone();
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
     (der, key_der)
@@ -137,7 +139,9 @@ fn make_client_leaf_with_serial(
     params.subject_alt_names = vec![uri(san)];
     params.serial_number = Some(SerialNumber::from(serial));
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-    let cert = params.signed_by(&key, &ca.cert, &ca.key).expect("leaf signed");
+    let cert = params
+        .signed_by(&key, &ca.cert, &ca.key)
+        .expect("leaf signed");
     let der = cert.der().clone();
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
     (der, key_der)
@@ -167,7 +171,9 @@ fn make_crl(ca: &Ca, revoked_serials: &[u64]) -> CertificateRevocationListDer<'s
         revoked_certs,
         key_identifier_method: KeyIdMethod::Sha256,
     };
-    let crl = params.signed_by(&ca.cert, &ca.key).expect("crl signed by ca");
+    let crl = params
+        .signed_by(&ca.cert, &ca.key)
+        .expect("crl signed by ca");
     crl.der().clone()
 }
 
@@ -408,7 +414,9 @@ impl ServerCertVerifier for AcceptAnyServer {
     }
 }
 
-fn client_config(client_auth: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>) -> ClientConfig {
+fn client_config(
+    client_auth: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
+) -> ClientConfig {
     let provider = Arc::new(ring::default_provider());
     let builder = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -416,7 +424,9 @@ fn client_config(client_auth: Option<(Vec<CertificateDer<'static>>, PrivateKeyDe
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAnyServer));
     match client_auth {
-        Some((chain, key)) => builder.with_client_auth_cert(chain, key).expect("client auth cert"),
+        Some((chain, key)) => builder
+            .with_client_auth_cert(chain, key)
+            .expect("client auth cert"),
         None => builder.with_no_client_auth(),
     }
 }
@@ -460,9 +470,7 @@ fn client_round_trip(
     Ok(response[pos..].to_vec())
 }
 
-fn server_config_for(
-    ca: &Ca,
-) -> Arc<rustls::ServerConfig> {
+fn server_config_for(ca: &Ca) -> Arc<rustls::ServerConfig> {
     // Server presents its own leaf; the CLIENT-CA root is `ca` (the issuer of the
     // client certs we mint below).
     let server_ca = make_ca();
@@ -502,19 +510,28 @@ fn server_config_with_crls_for(
 fn mtls_round_trip_extracts_client_identity_and_serves_request() {
     let client_ca = make_ca();
     let config = server_config_for(&client_ca);
-    let (client_cert, client_key) =
-        make_leaf(&client_ca, vec![uri("spiffe://example.org/agent-1")], None, true);
+    let (client_cert, client_key) = make_leaf(
+        &client_ca,
+        vec![uri("spiffe://example.org/agent-1")],
+        None,
+        true,
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
 
     let server = thread::spawn(move || {
-        serve_once(&listener, config, &ServerOptions::default(), |request, identity| {
-            // Echo the request body back; the identity is asserted via the join.
-            assert_eq!(request, b"{\"jsonrpc\":\"2.0\"}");
-            let _ = identity;
-            b"{\"ok\":true}".to_vec()
-        })
+        serve_once(
+            &listener,
+            config,
+            &ServerOptions::default(),
+            |request, identity| {
+                // Echo the request body back; the identity is asserted via the join.
+                assert_eq!(request, b"{\"jsonrpc\":\"2.0\"}");
+                let _ = identity;
+                b"{\"ok\":true}".to_vec()
+            },
+        )
     });
 
     let response = client_round_trip(
@@ -556,13 +573,41 @@ fn make_ed25519_server_leaf(ca: &Ca) -> (CertificateDer<'static>, LocalEd25519Tl
     let key = KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("ed25519 key");
     let mut params = CertificateParams::new(Vec::new()).expect("leaf params");
     params.subject_alt_names = vec![dns("localhost")];
-    params.distinguished_name.push(DnType::CommonName, "localhost");
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "localhost");
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    let cert = params.signed_by(&key, &ca.cert, &ca.key).expect("ed25519 leaf signed");
+    let cert = params
+        .signed_by(&key, &ca.cert, &ca.key)
+        .expect("ed25519 leaf signed");
     let der = cert.der().clone();
     let pkcs8 = key.serialize_der();
+    // RFC 8410 PKCS#8 Ed25519: the 32-byte seed sits at bytes [16..48], immediately
+    // after the Ed25519 AlgorithmIdentifier + OCTET-STRING headers. The outer
+    // SEQUENCE length and version vary (rcgen emits the v2 form WITH the public key
+    // appended, ~83 bytes), but bytes [5..16] — `30 05 06 03 2b 65 70 04 22 04 20`
+    // (Ed25519 OID, then the `04 22` private-key wrapper and `04 20` inner OCTET
+    // STRING) — are invariant and directly precede the seed. Anchor on that so a
+    // future rcgen encoding change fails closed with a clear error rather than
+    // silently slicing the wrong bytes.
+    const ED25519_SEED_HEADER: [u8; 11] = [
+        0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+    ];
+    assert!(
+        pkcs8.len() >= 48,
+        "expected an Ed25519 PKCS#8 key of at least 48 bytes, got {}",
+        pkcs8.len()
+    );
+    assert_eq!(
+        &pkcs8[5..16],
+        &ED25519_SEED_HEADER,
+        "unexpected Ed25519 PKCS#8 header; rcgen encoding may have changed"
+    );
     let seed: [u8; 32] = pkcs8[16..48].try_into().expect("ed25519 pkcs8 seed");
-    (der, LocalEd25519Tls(mcps_core::SigningKey::from_seed_bytes(&seed)))
+    (
+        der,
+        LocalEd25519Tls(mcps_core::SigningKey::from_seed_bytes(&seed)),
+    )
 }
 
 #[test]
@@ -587,17 +632,26 @@ fn delegated_ed25519_tls_handshake_round_trip() {
         .expect("delegated server config"),
     );
 
-    let (client_cert, client_key) =
-        make_leaf(&client_ca, vec![uri("spiffe://example.org/agent-1")], None, true);
+    let (client_cert, client_key) = make_leaf(
+        &client_ca,
+        vec![uri("spiffe://example.org/agent-1")],
+        None,
+        true,
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let server = thread::spawn(move || {
-        serve_once(&listener, config, &ServerOptions::default(), |request, identity| {
-            assert_eq!(request, b"{\"jsonrpc\":\"2.0\"}");
-            let _ = identity;
-            b"{\"ok\":true}".to_vec()
-        })
+        serve_once(
+            &listener,
+            config,
+            &ServerOptions::default(),
+            |request, identity| {
+                assert_eq!(request, b"{\"jsonrpc\":\"2.0\"}");
+                let _ = identity;
+                b"{\"ok\":true}".to_vec()
+            },
+        )
     });
 
     let response = client_round_trip(
@@ -736,7 +790,9 @@ fn within_limit_client_cert_is_served() {
     };
 
     let server = thread::spawn(move || {
-        serve_once(&listener, config, &options, |_req, _id| b"{\"ok\":true}".to_vec())
+        serve_once(&listener, config, &options, |_req, _id| {
+            b"{\"ok\":true}".to_vec()
+        })
     });
     let body = client_round_trip(
         addr,
@@ -745,7 +801,10 @@ fn within_limit_client_cert_is_served() {
     )
     .expect("round trip");
     let _ = server.join();
-    assert_eq!(body, b"{\"ok\":true}", "a cert within the max lifetime is served");
+    assert_eq!(
+        body, b"{\"ok\":true}",
+        "a cert within the max lifetime is served"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -772,10 +831,15 @@ fn non_revoked_client_cert_completes_handshake_with_crl_configured() {
     let addr = listener.local_addr().expect("addr");
 
     let server = thread::spawn(move || {
-        serve_once(&listener, config, &ServerOptions::default(), |request, _id| {
-            assert_eq!(request, b"{\"jsonrpc\":\"2.0\"}");
-            b"{\"ok\":true}".to_vec()
-        })
+        serve_once(
+            &listener,
+            config,
+            &ServerOptions::default(),
+            |request, _id| {
+                assert_eq!(request, b"{\"jsonrpc\":\"2.0\"}");
+                b"{\"ok\":true}".to_vec()
+            },
+        )
     });
 
     let response = client_round_trip(
@@ -796,8 +860,11 @@ fn revoked_client_cert_handshake_is_rejected() {
     let client_ca = make_ca();
     let revoked_serial = 0x0000_0099;
     // The client cert and the CRL share the SAME serial → this cert is revoked.
-    let (client_cert, client_key) =
-        make_client_leaf_with_serial(&client_ca, "spiffe://example.org/agent-revoked", revoked_serial);
+    let (client_cert, client_key) = make_client_leaf_with_serial(
+        &client_ca,
+        "spiffe://example.org/agent-revoked",
+        revoked_serial,
+    );
     let crl = make_crl(&client_ca, &[revoked_serial]);
     let config = server_config_with_crls_for(&client_ca, vec![crl]);
 
