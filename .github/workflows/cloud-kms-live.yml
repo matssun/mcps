@@ -1,0 +1,165 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Cloud-KMS live verification lanes (issue #62, §G Child 5; ADR-MCPS-028 §B/§C,
+# Verification §). These are the lanes that let MCP-S CLAIM AWS KMS / GCP Cloud KMS
+# support: a signature produced by a REAL KMS Sign / asymmetricSign MUST verify under
+# the UNMODIFIED mcps-core Ed25519 verifier, using the public key the same KMS reports
+# via GetPublicKey / getPublicKey. Compiling is NOT support; this live assertion is
+# (see mcps-proxy/tests/aws_kms_live_test.rs and gcp_kms_live_test.rs — both already
+# assert verify_ed25519(preimage, sig, response_public_key()) and a tampered-preimage
+# negative).
+#
+# ─── FIDELITY FINDING (the honesty mandate, issue #62) ──────────────────────────────
+# Both backends are NIGHTLY-REAL-ONLY. No faithful local emulator exists for the EXACT
+# Ed25519 op MCPS uses, so there is NO required emulator PR lane — a lane that cannot
+# really exercise the backend must NOT report success as if it did.
+#
+#   AWS / LocalStack: LocalStack's KMS implementation supports KeySpecs
+#     RSA_2048/3072/4096, ECC_NIST_P256/P384/P521, ECC_SECG_P256K1, HMAC_*,
+#     SYMMETRIC_DEFAULT only — there is NO ECC_NIST_EDWARDS25519 key spec and NO
+#     ED25519_SHA_512 signing algorithm in its source
+#     (localstack-core/localstack/services/kms/models.py, master, 2026-06).
+#     AWS KMS itself only added Edwards-curve EdDSA in Nov 2025, ahead of any emulator.
+#     => no faithful AWS emulator for ECC_NIST_EDWARDS25519 + ED25519_SHA_512/RAW.
+#
+#   GCP: The official tooling (gcloud beta emulators / fake-gcs) does NOT emulate Cloud
+#     KMS asymmetric signing. The two community emulators both lack EC_SIGN_ED25519:
+#       * winor30/fake-cloud-kms — symmetric (GOOGLE_SYMMETRIC_ENCRYPTION) only;
+#         asymmetric explicitly unsupported.
+#       * blackwell-systems/gcp-kms-emulator — asymmetricSign implements only
+#         EC_SIGN_SECP256K1_SHA256; Ed25519 is "not yet implemented".
+#     => no faithful GCP emulator for EC_SIGN_ED25519 asymmetricSign.
+#
+# Consequence: each backend gets a real-endpoint nightly + manual-dispatch lane, gated
+# so it runs ONLY when that backend's secrets are present. A missing secret set makes
+# the job a NO-OP that is honestly reported as "not exercised" (the guard job below
+# surfaces the nightly-real-only reason in the log), NEVER as passing coverage. When
+# the secrets ARE present, the lane runs the #[ignore] live test against the real
+# endpoint; the test itself HARD-FAILS loudly on any missing required env var, so a
+# half-configured lane cannot fake a green.
+#
+# Anti-gaming (issue #62):
+#   * The lanes invoke the #[ignore] tests with `-- --ignored`. Those tests call
+#     require_env() on every required var and panic if absent — a missing backend
+#     HARD-FAILS the job, never a silent skip. (MCPS_REQUIRE_LIVE_INFRA=1 is set for
+#     parity with the live-infra-e2e lane; the cloud-KMS tests hard-fail regardless.)
+#   * The load-bearing assertion is mcps-core's verify_ed25519 over the EXACT canonical
+#     preimage using response_public_key() — NOT the provider's own Verify.
+#   * A deliberately-tampered preimage is asserted to FAIL to verify, so a broken lane
+#     cannot pass.
+#
+# Cadence: NIGHTLY + manual dispatch only. This workflow is NON-BLOCKING — it is NOT in
+# the branch ruleset's required checks, so it never gates a PR merge, and a skipped
+# backend is never reported as a required passing check. The path-filtered
+# pull_request trigger runs only the YAML self-check job when this file changes.
+name: cloud-kms live
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # nightly 04:00 UTC (offset from live-infra-e2e at 03:00)
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/cloud-kms-live.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-kms-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Always-run informational job. On every trigger it prints the nightly-real-only
+  # determination and whether each backend's secrets are configured, so a skipped
+  # backend is explicitly SURFACED (never silently treated as covered). It does not
+  # itself verify anything and makes no coverage claim.
+  fidelity-notice:
+    name: cloud-kms fidelity notice (nightly-real-only)
+    runs-on: ubuntu-latest
+    # The `secrets` context is NOT available in a job-level `if:`, so secret PRESENCE
+    # is computed here (where `secrets` IS allowed, in step env) and exported as job
+    # outputs that the real-endpoint jobs gate on via `needs`. No secret VALUE is ever
+    # emitted — only the boolean "is it set".
+    outputs:
+      has_aws: ${{ steps.detect.outputs.has_aws }}
+      has_gcp: ${{ steps.detect.outputs.has_gcp }}
+    env:
+      HAS_AWS: ${{ secrets.MCPS_AWS_KMS_KEY_ID != '' }}
+      HAS_GCP: ${{ secrets.MCPS_GCP_KEY_VERSION != '' }}
+    steps:
+      - name: Detect backend secret presence
+        id: detect
+        run: |
+          echo "has_aws=${HAS_AWS}" >> "$GITHUB_OUTPUT"
+          echo "has_gcp=${HAS_GCP}" >> "$GITHUB_OUTPUT"
+      - name: Surface the nightly-real-only determination
+        run: |
+          echo "::notice title=cloud-kms fidelity::Both AWS and GCP Cloud KMS lanes are NIGHTLY-REAL-ONLY."
+          echo "AWS reason: LocalStack KMS has no ECC_NIST_EDWARDS25519 key spec / ED25519_SHA_512 algorithm (no faithful emulator)."
+          echo "GCP reason: no faithful Cloud KMS emulator supports EC_SIGN_ED25519 asymmetricSign (fake-cloud-kms=symmetric only; gcp-kms-emulator=secp256k1 only)."
+          echo "AWS secrets present (lane will run real-endpoint test): ${HAS_AWS}"
+          echo "GCP secrets present (lane will run real-endpoint test): ${HAS_GCP}"
+          if [ "${HAS_AWS}" != "true" ]; then
+            echo "::warning title=aws-kms not exercised::MCPS_AWS_KMS_* secrets absent — AWS KMS NOT exercised this run. This is NOT coverage; provide secrets to run the real-endpoint lane."
+          fi
+          if [ "${HAS_GCP}" != "true" ]; then
+            echo "::warning title=gcp-kms not exercised::MCPS_GCP_* secrets absent — GCP Cloud KMS NOT exercised this run. This is NOT coverage; provide secrets to run the real-endpoint lane."
+          fi
+
+  aws-kms-real:
+    name: aws kms live (real endpoint, nightly-real-only)
+    runs-on: ubuntu-latest
+    # Gate: run ONLY when the AWS backend secrets are present (via the fidelity-notice
+    # job output, since `secrets` is not usable in `if:`). Never on a bare PR.
+    needs: fidelity-notice
+    if: ${{ github.event_name != 'pull_request' && needs.fidelity-notice.outputs.has_aws == 'true' }}
+    env:
+      # Parity with live-infra-e2e; the live test hard-fails on missing env regardless.
+      MCPS_REQUIRE_LIVE_INFRA: "1"
+      AWS_ACCESS_KEY_ID: ${{ secrets.MCPS_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.MCPS_AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.MCPS_AWS_SESSION_TOKEN }}
+      MCPS_AWS_KMS_KEY_ID: ${{ secrets.MCPS_AWS_KMS_KEY_ID }}
+      MCPS_AWS_KMS_REGION: ${{ secrets.MCPS_AWS_KMS_REGION }}
+      # Optional endpoint override (e.g. an internal-platform real KMS endpoint). Left
+      # empty by default => the real AWS endpoint. No emulator is used (none is faithful).
+      MCPS_AWS_KMS_ENDPOINT: ${{ secrets.MCPS_AWS_KMS_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Why this is nightly-real-only
+        run: |
+          echo "::notice title=aws-kms nightly-real-only::Running against a REAL AWS KMS endpoint because no faithful LocalStack/emulator supports ECC_NIST_EDWARDS25519 + ED25519_SHA_512/RAW."
+      - name: Select pinned toolchain (from rust-toolchain.toml)
+        run: rustup show && rustc --version && cargo --version
+      - name: Run AWS KMS live verification (#[ignore] test, real endpoint)
+        run: >-
+          cargo test -p mcps-proxy
+          --features aws_kms_keysource
+          --test aws_kms_live_test
+          -- --ignored aws_kms_signature_verifies_under_mcps_core
+
+  gcp-kms-real:
+    name: gcp cloud kms live (real endpoint, nightly-real-only)
+    runs-on: ubuntu-latest
+    needs: fidelity-notice
+    if: ${{ github.event_name != 'pull_request' && needs.fidelity-notice.outputs.has_gcp == 'true' }}
+    env:
+      MCPS_REQUIRE_LIVE_INFRA: "1"
+      MCPS_GCP_KEY_VERSION: ${{ secrets.MCPS_GCP_KEY_VERSION }}
+      MCPS_GCP_ACCESS_TOKEN: ${{ secrets.MCPS_GCP_ACCESS_TOKEN }}
+      # Optional endpoint override (real Cloud KMS by default; no faithful emulator).
+      MCPS_GCP_KMS_ENDPOINT: ${{ secrets.MCPS_GCP_KMS_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Why this is nightly-real-only
+        run: |
+          echo "::notice title=gcp-kms nightly-real-only::Running against a REAL Cloud KMS endpoint because no faithful emulator supports EC_SIGN_ED25519 asymmetricSign."
+      - name: Select pinned toolchain (from rust-toolchain.toml)
+        run: rustup show && rustc --version && cargo --version
+      - name: Run GCP Cloud KMS live verification (#[ignore] test, real endpoint)
+        run: >-
+          cargo test -p mcps-proxy
+          --features gcp_kms_keysource
+          --test gcp_kms_live_test
+          -- --ignored gcp_kms_signature_verifies_under_mcps_core
