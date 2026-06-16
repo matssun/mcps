@@ -241,6 +241,16 @@ pub struct Config {
     pub aws_kms_key_id: Option<String>,
     /// Optional AWS KMS endpoint override (emulator/test endpoint).
     pub aws_kms_endpoint: Option<String>,
+    /// AWS KMS key id / ARN / alias of the SECOND, DISTINCT Ed25519 KMS key that
+    /// custodies the TLS server key (issue #60, ADR-MCPS-028 §G). OPTIONAL and
+    /// independent of `aws_kms_key_id` (the object-signing key) — a separate
+    /// security principal the operator SHOULD scope with a distinct authz policy.
+    /// When `Some`, the TLS handshake is DELEGATED to KMS (the TLS private key never
+    /// leaves KMS) and an exported `--tls-key` is rejected by
+    /// [`validate_tls_signing_exclusivity`]; `None` keeps the file-backed TLS path.
+    /// Only meaningful when `key_source == AwsKms` (reuses `--aws-kms-region` /
+    /// `--aws-kms-endpoint`).
+    pub aws_kms_tls_key_id: Option<String>,
     /// GCP Cloud KMS key-version resource path
     /// (`projects/.../cryptoKeyVersions/N`). Required when `key_source == GcpKms`
     /// (ADR-MCPS-028 §C).
@@ -311,6 +321,7 @@ const KNOWN_PROXY_FLAGS: &[&str] = &[
     "--aws-kms-region",
     "--aws-kms-key-id",
     "--aws-kms-endpoint",
+    "--aws-kms-tls-key-id",
     "--gcp-kms-key-version",
     "--gcp-kms-endpoint",
     "--signing-key-seed",
@@ -407,6 +418,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut aws_kms_region: Option<String> = None;
     let mut aws_kms_key_id: Option<String> = None;
     let mut aws_kms_endpoint: Option<String> = None;
+    let mut aws_kms_tls_key_id: Option<String> = None;
     // ADR-MCPS-028 §C GCP Cloud KMS: key-version resource path required when
     // `--key-source gcp-kms`; endpoint optional; metadata-server token off by default
     // (operator MCPS_GCP_ACCESS_TOKEN), opt in with `--gcp-kms-use-metadata`.
@@ -519,6 +531,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             "--aws-kms-region" => aws_kms_region = Some(value.clone()),
             "--aws-kms-key-id" => aws_kms_key_id = Some(value.clone()),
             "--aws-kms-endpoint" => aws_kms_endpoint = Some(value.clone()),
+            "--aws-kms-tls-key-id" => aws_kms_tls_key_id = Some(value.clone()),
             "--gcp-kms-key-version" => gcp_kms_key_version = Some(value.clone()),
             "--gcp-kms-endpoint" => gcp_kms_endpoint = Some(value.clone()),
             "--signing-key-seed" => signing_key_seed = Some(value.clone()),
@@ -848,6 +861,15 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             );
         }
     }
+    // #60: the TLS-key id selects the SEPARATE KMS key that custodies the TLS key.
+    // It only has meaning for the AWS KMS source; a dangling id on any other source
+    // would silently do nothing (a false belief that the TLS key is KMS-resident),
+    // so reject it (fail closed) — mirrors the `--pkcs11-tls-key-label` guard.
+    if aws_kms_tls_key_id.is_some() && key_source != KeySourceKind::AwsKms {
+        return Err(
+            "--aws-kms-tls-key-id has no effect without --key-source aws-kms".to_string(),
+        );
+    }
     // ADR-MCPS-028 §C GCP Cloud KMS: the key-version resource path is required.
     if key_source == KeySourceKind::GcpKms && gcp_kms_key_version.is_none() {
         return Err(
@@ -933,13 +955,14 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         );
     }
 
-    // ADR-MCPS-028 §G / issue #58+#59: a source's TLS key is EITHER delegated to a
-    // non-exporting device/KMS XOR exported from a file — never both. Issue #59
-    // wires the FIRST delegated-TLS selector: `--pkcs11-tls-key-label` makes the TLS
-    // key token-resident, so an exported `--tls-key` alongside it is contradictory
-    // (the operator would believe the key never leaves the token while a file copy
-    // also exists) and fails closed here, before the proxy is constructed.
-    let has_delegated_tls = pkcs11_tls_key_label.is_some();
+    // ADR-MCPS-028 §G / issue #58+#59+#60: a source's TLS key is EITHER delegated to
+    // a non-exporting device/KMS XOR exported from a file — never both. The delegated
+    // selectors are `--pkcs11-tls-key-label` (#59, token-resident) and
+    // `--aws-kms-tls-key-id` (#60, KMS-resident); either makes the TLS key
+    // non-exporting, so an exported `--tls-key` alongside it is contradictory (the
+    // operator would believe the key never leaves the device while a file copy also
+    // exists) and fails closed here, before the proxy is constructed.
+    let has_delegated_tls = pkcs11_tls_key_label.is_some() || aws_kms_tls_key_id.is_some();
     let has_exported_tls_key = tls_key.is_some();
     validate_tls_signing_exclusivity(has_delegated_tls, has_exported_tls_key)?;
 
@@ -988,6 +1011,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         aws_kms_region,
         aws_kms_key_id,
         aws_kms_endpoint,
+        aws_kms_tls_key_id,
         gcp_kms_key_version,
         gcp_kms_endpoint,
         gcp_kms_use_metadata,
@@ -1359,21 +1383,47 @@ pub fn build_key_source(config: &Config) -> Result<Box<dyn KeySource>, KeyError>
                 opt.clone()
                     .ok_or_else(|| KeyError::NotFound(format!("--key-source aws-kms requires {flag}")))
             };
+            let region = require(&config.aws_kms_region, "--aws-kms-region")?;
             let kms_config = crate::aws_kms_keysource::AwsKmsConfig {
-                region: require(&config.aws_kms_region, "--aws-kms-region")?,
+                region: region.clone(),
                 key_id: require(&config.aws_kms_key_id, "--aws-kms-key-id")?,
                 endpoint: config.aws_kms_endpoint.clone(),
             };
             let backend = crate::aws_kms_keysource::AwsKmsEd25519Backend::from_env(&kms_config)?;
-            Ok(Box::new(crate::kms_keysource::KmsKeySource::new(
-                Box::new(backend),
-                FileKeySource {
-                    signing_key_seed_path: config.signing_key_seed.clone(),
-                    tls_cert_path: config.tls_cert.clone(),
-                    tls_key_path: config.tls_key.clone(),
-                    client_ca_path: config.client_ca.clone(),
-                },
-            )))
+            let tls = FileKeySource {
+                signing_key_seed_path: config.signing_key_seed.clone(),
+                tls_cert_path: config.tls_cert.clone(),
+                tls_key_path: config.tls_key.clone(),
+                client_ca_path: config.client_ca.clone(),
+            };
+            // #60: a configured TLS-key id custodies the TLS server key in a SECOND,
+            // DISTINCT KMS key (independent of the object-signing key). Its own
+            // `AwsKmsEd25519Backend` (same region/endpoint, the TLS key id) drives the
+            // delegated TLS handshake signature; the proxy then never reads `--tls-key`
+            // from disk (the exclusivity guard already forbade it). `None` keeps the
+            // file-backed TLS path.
+            match &config.aws_kms_tls_key_id {
+                Some(tls_key_id) => {
+                    let tls_kms_config = crate::aws_kms_keysource::AwsKmsConfig {
+                        region,
+                        key_id: tls_key_id.clone(),
+                        endpoint: config.aws_kms_endpoint.clone(),
+                    };
+                    let tls_backend =
+                        crate::aws_kms_keysource::AwsKmsEd25519Backend::from_env(&tls_kms_config)?;
+                    Ok(Box::new(
+                        crate::kms_keysource::KmsKeySource::new_with_delegated_tls(
+                            Box::new(backend),
+                            tls,
+                            std::sync::Arc::new(tls_backend),
+                        ),
+                    ))
+                }
+                None => Ok(Box::new(crate::kms_keysource::KmsKeySource::new(
+                    Box::new(backend),
+                    tls,
+                ))),
+            }
         }
         // Default build: the AWS KMS backend is not compiled, so `--key-source
         // aws-kms` FAILS CLOSED here (mirrors the pkcs11 gate). The flag still PARSES.
@@ -2855,6 +2905,73 @@ mod tests {
             let err = parse_args(&a).unwrap_err();
             assert!(err.contains(missing), "expected error to name {missing}; got: {err}");
         }
+    }
+
+    /// #60: `--aws-kms-tls-key-id` parses and is captured as the SECOND, distinct
+    /// TLS KMS key id. On this delegated path `--tls-key` is forbidden and not
+    /// required, so `minimal()`'s exported TLS key must be dropped first.
+    /// AWS KMS leading flags WITHOUT `--tls-key` (delegated TLS path), `--inner-command`
+    /// appended last so proxy flags land before the inner tail.
+    fn aws_kms_lead_no_tls_key() -> Vec<String> {
+        args(&[
+            "--bind", "127.0.0.1:8443",
+            "--audience", "did:example:server-1",
+            "--server-signer", "did:example:server-1",
+            "--server-key-id", "server-key-1",
+            "--key-source", "aws-kms",
+            "--aws-kms-region", "us-east-1",
+            "--aws-kms-key-id", "alias/mcps-response-signing",
+            "--signing-key-seed", "/unused-seed",
+            "--tls-cert", "/cert",
+            "--client-ca", "/ca",
+            "--trust", "/trust.json",
+        ])
+    }
+
+    #[test]
+    fn parses_aws_kms_tls_key_id_flag() {
+        let mut a = aws_kms_lead_no_tls_key();
+        a.push("--aws-kms-tls-key-id".to_string());
+        a.push("alias/mcps-tls-signing".to_string());
+        a.push("--inner-command".to_string());
+        a.push("my-server".to_string());
+        let config = parse_args(&a).expect("delegated TLS path parses without --tls-key");
+        assert_eq!(config.key_source, KeySourceKind::AwsKms);
+        assert_eq!(
+            config.aws_kms_tls_key_id.as_deref(),
+            Some("alias/mcps-tls-signing"),
+        );
+        // Distinct credential: the TLS key id differs from the object-signing key id.
+        assert_ne!(config.aws_kms_tls_key_id, config.aws_kms_key_id);
+    }
+
+    /// #60 / #58: `--aws-kms-tls-key-id` (delegated) PLUS an exported `--tls-key` is
+    /// contradictory and must fail closed (the exclusivity guard).
+    #[test]
+    fn aws_kms_tls_key_id_plus_exported_tls_key_fails_closed() {
+        // minimal() carries an exported `--tls-key`; adding a delegated TLS key id
+        // alongside it must be rejected.
+        let mut a = minimal();
+        a.splice(0..0, aws_kms_flags());
+        a.splice(0..0, args(&["--aws-kms-tls-key-id", "alias/mcps-tls"]));
+        let err = parse_args(&a).unwrap_err();
+        assert!(
+            err.contains("delegated") || err.contains("--tls-key"),
+            "expected an exclusivity error, got: {err}"
+        );
+    }
+
+    /// #60: a dangling `--aws-kms-tls-key-id` on a non-AWS source would silently do
+    /// nothing (a false belief the TLS key is KMS-resident), so it must fail closed.
+    #[test]
+    fn aws_kms_tls_key_id_without_aws_kms_fails_closed() {
+        let mut a = minimal();
+        a.splice(0..0, args(&["--aws-kms-tls-key-id", "alias/mcps-tls"]));
+        let err = parse_args(&a).unwrap_err();
+        assert!(
+            err.contains("--aws-kms-tls-key-id has no effect without --key-source aws-kms"),
+            "got: {err}"
+        );
     }
 
     #[test]

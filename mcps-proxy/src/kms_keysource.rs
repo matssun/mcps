@@ -19,11 +19,14 @@
 //! through the KMS (so the TLS private key also never leaves the device) is the
 //! companion hardening item (ADR-MCPS-028 §G), not delivered here.
 
+use std::sync::Arc;
+
 use mcps_core::b64url_encode;
 use mcps_core::VerificationKey;
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::PrivateKeyDer;
 
+use crate::delegated_tls::RawEd25519TlsSigner;
 use crate::key_source::FileKeySource;
 use crate::key_source::KeyError;
 use crate::key_source::KeySource;
@@ -126,20 +129,54 @@ impl ResponseSigner for KmsResponseSigner {
     }
 }
 
-/// A cloud-KMS [`KeySource`]: response signing is delegated to the KMS (the key
-/// never leaves it); TLS material is delegated to an inner [`FileKeySource`].
+/// A cloud-KMS [`KeySource`]: response signing is delegated to the KMS (the
+/// object-signing key never leaves it). TLS material comes from the inner
+/// [`FileKeySource`] (cert chain + client-CA roots always; the exported TLS *key*
+/// only on the non-delegated path).
+///
+/// Issue #60 (ADR-MCPS-028 §G): when `tls_signer` is `Some`, the TLS server key is
+/// ALSO non-exporting — a SECOND, DISTINCT KMS key (a separate key id, and the
+/// operator SHOULD scope it with a distinct authz policy) custodies it, and rustls
+/// drives the handshake signature through that backend (a [`RawEd25519TlsSigner`])
+/// so the TLS private key never leaves KMS. `None` keeps the file-backed TLS key.
+/// The two KMS keys are independent: neither requires the other, and they are NOT
+/// required to differ in code beyond being separate config fields.
 pub struct KmsKeySource {
     signer: KmsResponseSigner,
     tls: FileKeySource,
+    /// Optional DELEGATED TLS handshake signer (issue #60). `Some` when a distinct
+    /// TLS KMS key id is configured; returned from [`KeySource::tls_delegated_signer`]
+    /// so the #58 validated build path fails closed on a cert/key mismatch.
+    tls_signer: Option<Arc<dyn RawEd25519TlsSigner>>,
 }
 
 impl KmsKeySource {
     /// Build a KMS key source from a KMS signing backend and a file source for the
-    /// TLS materials (cert chain, TLS key, client-CA roots).
+    /// TLS materials (cert chain, TLS key, client-CA roots). No delegated TLS: the
+    /// TLS key is read from the file source unchanged.
     pub fn new(backend: Box<dyn KmsEd25519Backend + Send + Sync>, tls: FileKeySource) -> Self {
         KmsKeySource {
             signer: KmsResponseSigner::new(backend),
             tls,
+            tls_signer: None,
+        }
+    }
+
+    /// Build a KMS key source whose TLS handshake is ALSO delegated to a
+    /// non-exporting KMS key (issue #60, ADR-MCPS-028 §G): `tls_signer` is a SECOND,
+    /// DISTINCT KMS key from `backend` (the object-signing key). The file source
+    /// still provides the (public) TLS cert chain and client-CA roots; its TLS *key*
+    /// path is NOT consulted (the exclusivity guard forbids an exported `--tls-key`
+    /// on this path).
+    pub fn new_with_delegated_tls(
+        backend: Box<dyn KmsEd25519Backend + Send + Sync>,
+        tls: FileKeySource,
+        tls_signer: Arc<dyn RawEd25519TlsSigner>,
+    ) -> Self {
+        KmsKeySource {
+            signer: KmsResponseSigner::new(backend),
+            tls,
+            tls_signer: Some(tls_signer),
         }
     }
 }
@@ -163,6 +200,15 @@ impl KeySource for KmsKeySource {
     fn client_ca_roots(&self) -> Result<Vec<CertificateDer<'static>>, KeyError> {
         self.tls.client_ca_roots()
     }
+
+    /// Issue #60 (ADR-MCPS-028 §G): `Some` when a distinct TLS KMS key id was
+    /// configured (delegated TLS — the TLS private key never leaves KMS); `None`
+    /// keeps the file-backed TLS key. The validated build path (#58) feeds this
+    /// signer's public key into the cert↔signer match check, failing closed before
+    /// any server starts.
+    fn tls_delegated_signer(&self) -> Option<Arc<dyn RawEd25519TlsSigner>> {
+        self.tls_signer.clone()
+    }
 }
 
 #[cfg(test)]
@@ -171,10 +217,16 @@ mod tests {
     use mcps_core::verify_ed25519;
     use mcps_core::SigningKey;
 
+    use std::sync::Arc;
+
     use super::ed25519_raw_point_from_spki;
+    use super::FileKeySource;
     use super::KeyError;
+    use super::KeySource;
     use super::KmsEd25519Backend;
+    use super::KmsKeySource;
     use super::KmsResponseSigner;
+    use super::RawEd25519TlsSigner;
     use super::ResponseSigner;
     use super::ED25519_SPKI_PREFIX;
 
@@ -289,6 +341,57 @@ mod tests {
         assert!(
             verify_ed25519(preimage, &sig, &pubkey).is_err(),
             "a prehash/DIGEST signature must NOT verify over the raw preimage"
+        );
+    }
+
+    /// A local delegated TLS signer (stand-in for a SECOND KMS key) — used to prove
+    /// `tls_delegated_signer()` reflects whether a distinct TLS key was wired.
+    struct LocalTlsSigner(SigningKey);
+    impl RawEd25519TlsSigner for LocalTlsSigner {
+        fn sign_tls_ed25519(&self, message: &[u8]) -> Result<Vec<u8>, KeyError> {
+            Ok(b64url_decode(&self.0.sign(message)).expect("local sig is valid b64url"))
+        }
+        fn tls_public_key_spki_der(&self) -> Result<Vec<u8>, KeyError> {
+            Ok(ed25519_spki_from_raw(&self.0.public_key().to_bytes()))
+        }
+    }
+
+    fn inert_file_source() -> FileKeySource {
+        // The delegated path never reads these; the object responses come from the
+        // KMS backend and the TLS sign from the delegated signer.
+        FileKeySource {
+            signing_key_seed_path: "/dev/null".to_string(),
+            tls_cert_path: "/dev/null".to_string(),
+            tls_key_path: "/dev/null".to_string(),
+            client_ca_path: "/dev/null".to_string(),
+        }
+    }
+
+    /// Issue #60 (test b): without a TLS key id the KMS source delegates NO TLS
+    /// signer (`None` → file-backed TLS key); with a distinct TLS KMS key it returns
+    /// `Some` — the seam the #58 validated build path consumes.
+    #[test]
+    fn tls_delegated_signer_is_none_without_tls_key_some_with() {
+        let no_tls = KmsKeySource::new(Box::new(FakeKms { key: test_key() }), inert_file_source());
+        assert!(
+            no_tls.tls_delegated_signer().is_none(),
+            "no TLS key id → file-backed TLS path (no delegated signer)"
+        );
+
+        let tls_key = SigningKey::from_seed_bytes(&[31u8; 32]);
+        let expected_spki = ed25519_spki_from_raw(&tls_key.public_key().to_bytes());
+        let with_tls = KmsKeySource::new_with_delegated_tls(
+            Box::new(FakeKms { key: test_key() }),
+            inert_file_source(),
+            Arc::new(LocalTlsSigner(tls_key)),
+        );
+        let signer = with_tls
+            .tls_delegated_signer()
+            .expect("a distinct TLS KMS key id → delegated TLS signer");
+        assert_eq!(
+            signer.tls_public_key_spki_der().unwrap(),
+            expected_spki,
+            "the delegated signer advertises the TLS key's SPKI (the #58 cert-match basis)"
         );
     }
 }
