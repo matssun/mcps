@@ -131,6 +131,33 @@ consequence for the KMS path: delegated TLS makes a KMS `Sign` network call on e
 TLS handshake (latency + availability coupling), an accepted trade-off for the
 never-export property; the PKCS#11 path signs locally on the token.
 
+**G.1 Completion plan — wiring the backends to the §G mechanism.** The §G mechanism
+is generic; making TLS-key custody usable end-to-end requires wiring each real
+backend to it. This is the planned, scoped remaining work (tracked as GitHub
+issues; design recorded here):
+
+1. *Seam + path selection.* Add `KeySource::tls_delegated_signer(&self) ->
+   Option<Arc<dyn RawEd25519TlsSigner>>` defaulting to `None` — the file/env/PKCS#11
+   object-signing sources keep exporting the TLS key, so the default build is
+   unchanged. When it returns `Some`, the proxy builds the server config via the
+   delegated path (`build_server_config_delegated_with_crls`) and does NOT call
+   `tls_server_key`. Configuring both an exported `--tls-key` and a delegated TLS
+   key is rejected (mutually exclusive, fail closed).
+2. *AWS + GCP Cloud KMS.* `KmsEd25519Backend` implements `RawEd25519TlsSigner` keyed
+   by a SECOND KMS key (the TLS key, distinct from the object-signing key), reusing
+   the existing RAW-Ed25519 `Sign`/`asymmetricSign` path. CLI: `--aws-kms-tls-key-id`
+   / `--gcp-kms-tls-key-version`, with `--tls-key` relaxed when set.
+3. *PKCS#11.* A second token object (TLS key label) using a `CKM_EDDSA` signing
+   operation (`sign_tls_ed25519`), implementing `RawEd25519TlsSigner`. CLI:
+   `--pkcs11-tls-key-label`. The PKCS#11 path signs locally on the token (no
+   per-handshake network call, unlike KMS).
+
+Each path is proven by a real in-process mTLS handshake under full WebPKI server
+validation (chain + validity + hostname + `CertificateVerify` signature) — a
+corrupted delegated signature must fail the handshake. The internal-platform TLS
+key (§F) is wired privately in the monorepo against the same `RawEd25519TlsSigner`
+trait; no internal specifics enter this repo.
+
 ## Verification (no-gaming)
 
 Per the live-infra-lane discipline already used for Redis / SoftHSM2 / OCSP, each
