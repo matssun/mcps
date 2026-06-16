@@ -89,8 +89,6 @@ named in its ADR and tracked as v0.4 axis-hardening:
 ## [0.2.0] — 2026-06-05
 
 This is the **initial public release** of MCP-S. v0.1 existed only inside the
-
-This is the **initial public release** of MCP-S. v0.1 existed only inside the
 authoring monorepo and was never published as source; it is captured here for
 historical accuracy because both the architecture and the security review
 process span it.
