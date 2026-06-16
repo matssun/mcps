@@ -226,23 +226,12 @@ impl RustlsDirectProvider {
         allow_unknown_revocation_status: bool,
     ) -> Result<ServerConfig, TlsError> {
         let provider = Arc::new(ring::default_provider());
-
-        let mut roots = RootCertStore::empty();
-        for ca in client_ca {
-            roots.add(ca).map_err(|_| TlsError::BadClientCa)?;
-        }
-        let mut builder =
-            WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-                .with_crls(crls);
-        // Default is the strict fail-closed posture (unknown status → reject); only
-        // an explicit operator opt-out relaxes it. A malformed CRL surfaces from
-        // `.build()` below as a startup `TlsError::Verifier` (fail closed).
-        if allow_unknown_revocation_status {
-            builder = builder.allow_unknown_revocation_status();
-        }
-        let verifier = builder
-            .build()
-            .map_err(|e| TlsError::Verifier(e.to_string()))?;
+        let verifier = build_client_verifier(
+            client_ca,
+            crls,
+            allow_unknown_revocation_status,
+            provider.clone(),
+        )?;
 
         // MCPS-079 fault injection ("test of the tests"), the symmetric mirror of
         // mcps-transport's `fault_accept_any_server`. When — and ONLY when — the
@@ -278,6 +267,65 @@ impl RustlsDirectProvider {
 
         server_config
     }
+}
+
+/// Build the fail-closed WebPKI client-certificate verifier shared by the
+/// exported-key ([`ServerOptions::build_server_config_with_crls`]) and delegated-key
+/// ([`build_server_config_delegated_with_crls`]) server-config paths. Sharing it
+/// keeps the security-critical verifier posture identical across both: strict
+/// unknown-status rejection by default, full-chain revocation, operator opt-out
+/// only via `allow_unknown_revocation_status`, and a malformed CRL → startup
+/// `TlsError::Verifier` (fail closed).
+fn build_client_verifier(
+    client_ca: Vec<CertificateDer<'static>>,
+    crls: Vec<CertificateRevocationListDer<'static>>,
+    allow_unknown_revocation_status: bool,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>, TlsError> {
+    let mut roots = RootCertStore::empty();
+    for ca in client_ca {
+        roots.add(ca).map_err(|_| TlsError::BadClientCa)?;
+    }
+    let mut builder =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider).with_crls(crls);
+    if allow_unknown_revocation_status {
+        builder = builder.allow_unknown_revocation_status();
+    }
+    builder
+        .build()
+        .map_err(|e| TlsError::Verifier(e.to_string()))
+}
+
+/// Build a mutual-TLS [`ServerConfig`] whose server certificate is signed by a
+/// non-exporting device/KMS via a [`ResolvesServerCert`] (ADR-MCPS-028 §G), rather
+/// than from an exported private key. The TLS server private key never leaves the
+/// device; rustls drives the handshake signature through the resolver's
+/// [`SigningKey`](rustls::sign::SigningKey).
+///
+/// The client-cert verifier posture is IDENTICAL to the exported-key path (shared
+/// [`build_client_verifier`]). The `fault_accept_any_client` test bypass is NOT
+/// wired here: it exercises the standard exported-key serving path, and weakening
+/// client auth is orthogonal to (and must not be conflated with) server-key
+/// delegation — the delegated path always uses the real verifier.
+pub fn build_server_config_delegated_with_crls(
+    cert_resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+    client_ca: Vec<CertificateDer<'static>>,
+    crls: Vec<CertificateRevocationListDer<'static>>,
+    allow_unknown_revocation_status: bool,
+) -> Result<ServerConfig, TlsError> {
+    let provider = Arc::new(ring::default_provider());
+    let verifier = build_client_verifier(
+        client_ca,
+        crls,
+        allow_unknown_revocation_status,
+        provider.clone(),
+    )?;
+    let server_config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| TlsError::Config(e.to_string()))?
+        .with_client_cert_verifier(verifier)
+        .with_cert_resolver(cert_resolver);
+    Ok(server_config)
 }
 
 /// Extract the verified client identity from a leaf certificate (DER) using the

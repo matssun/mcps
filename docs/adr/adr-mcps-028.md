@@ -109,11 +109,27 @@ HSM/IDP/KMS) live in the monorepo as private implementations of the **same**
 `ResponseSigner` trait — the trait is the only coupling; no internal specifics enter
 the public repo.
 
-**G. TLS-key custody is a distinct surface (tracked separately).** This ADR covers
-the **object-signing** key. The TLS server private key is still exported via
-`KeySource::tls_server_key` even on the PKCS#11 path; delegated TLS signing (a
-custom `rustls::sign::SigningKey` fronting the device/KMS) is the companion
-hardening item and is sequenced alongside but specified elsewhere.
+**G. TLS-key custody — delegated TLS handshake signing.** The object-signing key
+(§B–§F) lives in the device/KMS; this item closes the matching gap for the TLS
+*server* key, which was still exported via `KeySource::tls_server_key`. The generic
+mechanism is implemented: a custom `rustls::sign::SigningKey`
+(`DelegatedEd25519SigningKey`) whose `Signer::sign` forwards the to-be-signed
+handshake transcript to a non-exporting `RawEd25519TlsSigner` (PKCS#11 token / AWS
+or GCP KMS), paired with the public server cert via a `DelegatedCertResolver` and a
+`with_cert_resolver` server-config path that shares the exported-key path's
+fail-closed client-cert verifier. It is **Ed25519-only**: rustls signs the TLS 1.3
+transcript with `SignatureScheme::ED25519` (PureEdDSA over the message), exactly the
+raw-sign primitive the KMS/PKCS#11 backends expose, so the TLS certificate MUST be
+an Ed25519 cert whose key lives in the device/KMS (a non-Ed25519 TLS cert fails
+closed — no scheme offered). The TLS key is a SEPARATE credential from the
+object-signing key. Wire-correctness is proven by a real in-process mTLS handshake
+in which a rustls client completes the handshake against a server whose TLS key
+never reaches rustls. The per-backend TLS-key wiring (a second KMS key id / token
+object, plus its CLI flags, and the `KeySource` seam selecting the delegated path)
+is sequenced as the immediate follow-up to this mechanism. Note the operational
+consequence for the KMS path: delegated TLS makes a KMS `Sign` network call on every
+TLS handshake (latency + availability coupling), an accepted trade-off for the
+never-export property; the PKCS#11 path signs locally on the token.
 
 ## Verification (no-gaming)
 

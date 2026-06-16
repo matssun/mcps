@@ -531,6 +531,90 @@ fn mtls_round_trip_extracts_client_identity_and_serves_request() {
     assert_eq!(identity.source, IdentitySource::UriSan);
 }
 
+// ---------------------------------------------------------------------------
+// ADR-MCPS-028 §G: delegated TLS handshake signing. The server's TLS key is NOT
+// exported to rustls; instead a `RawEd25519TlsSigner` (here a local Ed25519 key
+// standing in for a PKCS#11 token / KMS) signs each handshake. A real rustls
+// client completing the mTLS handshake PROVES the delegated Ed25519 signature is
+// wire-correct (rustls verifies it against the server's Ed25519 certificate).
+// ---------------------------------------------------------------------------
+
+/// A delegated signer backed by a LOCAL Ed25519 key (stand-in for device/KMS):
+/// signs the raw handshake transcript exactly as a KMS RAW `Sign` would.
+#[derive(Debug)]
+struct LocalEd25519Tls(mcps_core::SigningKey);
+impl mcps_proxy::RawEd25519TlsSigner for LocalEd25519Tls {
+    fn sign_tls_ed25519(&self, message: &[u8]) -> Result<Vec<u8>, mcps_proxy::KeyError> {
+        Ok(mcps_core::b64url_decode(&self.0.sign(message)).expect("local sig is valid b64url"))
+    }
+}
+
+/// Mint an Ed25519 server leaf signed by `ca`, returning the cert plus the local
+/// delegated signer whose key is the cert's key (seed extracted from the rcgen
+/// PKCS#8: a fixed 16-byte prefix `... 04 22 04 20` then the 32-byte seed).
+fn make_ed25519_server_leaf(ca: &Ca) -> (CertificateDer<'static>, LocalEd25519Tls) {
+    let key = KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("ed25519 key");
+    let mut params = CertificateParams::new(Vec::new()).expect("leaf params");
+    params.subject_alt_names = vec![dns("localhost")];
+    params.distinguished_name.push(DnType::CommonName, "localhost");
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let cert = params.signed_by(&key, &ca.cert, &ca.key).expect("ed25519 leaf signed");
+    let der = cert.der().clone();
+    let pkcs8 = key.serialize_der();
+    let seed: [u8; 32] = pkcs8[16..48].try_into().expect("ed25519 pkcs8 seed");
+    (der, LocalEd25519Tls(mcps_core::SigningKey::from_seed_bytes(&seed)))
+}
+
+#[test]
+fn delegated_ed25519_tls_handshake_round_trip() {
+    let client_ca = make_ca();
+    // Server CA issues the (Ed25519) server leaf; the proxy trusts `client_ca` for
+    // CLIENT auth. The server's TLS private key never reaches rustls — the resolver
+    // holds only the public cert + the delegated signer.
+    let server_ca = make_ca();
+    let (server_cert, delegated_signer) = make_ed25519_server_leaf(&server_ca);
+    let resolver = mcps_proxy::DelegatedCertResolver::new(
+        vec![server_cert],
+        std::sync::Arc::new(delegated_signer),
+    );
+    let config = std::sync::Arc::new(
+        mcps_proxy::build_server_config_delegated_with_crls(
+            resolver,
+            vec![client_ca.cert.der().clone()],
+            Vec::new(),
+            false,
+        )
+        .expect("delegated server config"),
+    );
+
+    let (client_cert, client_key) =
+        make_leaf(&client_ca, vec![uri("spiffe://example.org/agent-1")], None, true);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = thread::spawn(move || {
+        serve_once(&listener, config, &ServerOptions::default(), |request, identity| {
+            assert_eq!(request, b"{\"jsonrpc\":\"2.0\"}");
+            let _ = identity;
+            b"{\"ok\":true}".to_vec()
+        })
+    });
+
+    let response = client_round_trip(
+        addr,
+        client_config(Some((vec![client_cert], client_key))),
+        b"{\"jsonrpc\":\"2.0\"}",
+    )
+    .expect("client round trip over a delegated-signed handshake");
+    assert_eq!(response, b"{\"ok\":true}");
+
+    let identity = server.join().expect("join").expect("serve ok");
+    assert_eq!(
+        identity.expect("verified client identity").value,
+        "spiffe://example.org/agent-1"
+    );
+}
+
 #[test]
 fn missing_client_certificate_is_rejected() {
     let client_ca = make_ca();
