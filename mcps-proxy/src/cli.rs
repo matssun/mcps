@@ -257,6 +257,16 @@ pub struct Config {
     pub gcp_kms_key_version: Option<String>,
     /// Optional GCP Cloud KMS endpoint override (emulator/test endpoint).
     pub gcp_kms_endpoint: Option<String>,
+    /// GCP Cloud KMS key-version resource path of the SECOND, DISTINCT
+    /// `EC_SIGN_ED25519` key version that custodies the TLS server key (issue #61,
+    /// ADR-MCPS-028 §G). OPTIONAL and independent of `gcp_kms_key_version` (the
+    /// object-signing key) — a separate security principal the operator SHOULD scope
+    /// with a distinct IAM policy. When `Some`, the TLS handshake is DELEGATED to
+    /// Cloud KMS (the TLS private key never leaves KMS) and an exported `--tls-key`
+    /// is rejected by [`validate_tls_signing_exclusivity`]; `None` keeps the
+    /// file-backed TLS path. Only meaningful when `key_source == GcpKms` (reuses
+    /// `--gcp-kms-endpoint` / `--gcp-kms-use-metadata`).
+    pub gcp_kms_tls_key_version: Option<String>,
     /// Use the GCE/GKE metadata server (workload identity) for the GCP KMS OAuth2
     /// token instead of an operator-supplied `MCPS_GCP_ACCESS_TOKEN`.
     pub gcp_kms_use_metadata: bool,
@@ -324,6 +334,7 @@ const KNOWN_PROXY_FLAGS: &[&str] = &[
     "--aws-kms-tls-key-id",
     "--gcp-kms-key-version",
     "--gcp-kms-endpoint",
+    "--gcp-kms-tls-key-version",
     "--signing-key-seed",
     "--tls-cert",
     "--tls-key",
@@ -424,6 +435,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     // (operator MCPS_GCP_ACCESS_TOKEN), opt in with `--gcp-kms-use-metadata`.
     let mut gcp_kms_key_version: Option<String> = None;
     let mut gcp_kms_endpoint: Option<String> = None;
+    let mut gcp_kms_tls_key_version: Option<String> = None;
     let mut gcp_kms_use_metadata = false;
     let mut limits = ServerLimits::default();
     // v1 revocation posture: short-lived client certs, proxy-enforced, default 1h.
@@ -534,6 +546,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             "--aws-kms-tls-key-id" => aws_kms_tls_key_id = Some(value.clone()),
             "--gcp-kms-key-version" => gcp_kms_key_version = Some(value.clone()),
             "--gcp-kms-endpoint" => gcp_kms_endpoint = Some(value.clone()),
+            "--gcp-kms-tls-key-version" => gcp_kms_tls_key_version = Some(value.clone()),
             "--signing-key-seed" => signing_key_seed = Some(value.clone()),
             "--tls-cert" => tls_cert = Some(value.clone()),
             "--tls-key" => tls_key = Some(value.clone()),
@@ -878,6 +891,16 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
                 .to_string(),
         );
     }
+    // #61: the TLS-key-version selects the SEPARATE Cloud KMS key version that
+    // custodies the TLS key. It only has meaning for the GCP KMS source; a dangling
+    // version on any other source would silently do nothing (a false belief that the
+    // TLS key is KMS-resident), so reject it (fail closed) — mirrors the
+    // `--aws-kms-tls-key-id` / `--pkcs11-tls-key-label` guards.
+    if gcp_kms_tls_key_version.is_some() && key_source != KeySourceKind::GcpKms {
+        return Err(
+            "--gcp-kms-tls-key-version has no effect without --key-source gcp-kms".to_string(),
+        );
+    }
     // The metadata-server flag only has meaning for the GCP KMS source; a dangling
     // `--gcp-kms-use-metadata` would silently do nothing, so reject it.
     if gcp_kms_use_metadata && key_source != KeySourceKind::GcpKms {
@@ -955,14 +978,17 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         );
     }
 
-    // ADR-MCPS-028 §G / issue #58+#59+#60: a source's TLS key is EITHER delegated to
-    // a non-exporting device/KMS XOR exported from a file — never both. The delegated
-    // selectors are `--pkcs11-tls-key-label` (#59, token-resident) and
-    // `--aws-kms-tls-key-id` (#60, KMS-resident); either makes the TLS key
-    // non-exporting, so an exported `--tls-key` alongside it is contradictory (the
-    // operator would believe the key never leaves the device while a file copy also
-    // exists) and fails closed here, before the proxy is constructed.
-    let has_delegated_tls = pkcs11_tls_key_label.is_some() || aws_kms_tls_key_id.is_some();
+    // ADR-MCPS-028 §G / issue #58+#59+#60+#61: a source's TLS key is EITHER delegated
+    // to a non-exporting device/KMS XOR exported from a file — never both. The
+    // delegated selectors are `--pkcs11-tls-key-label` (#59, token-resident),
+    // `--aws-kms-tls-key-id` (#60, AWS-KMS-resident) and `--gcp-kms-tls-key-version`
+    // (#61, Cloud-KMS-resident); any makes the TLS key non-exporting, so an exported
+    // `--tls-key` alongside it is contradictory (the operator would believe the key
+    // never leaves the device while a file copy also exists) and fails closed here,
+    // before the proxy is constructed.
+    let has_delegated_tls = pkcs11_tls_key_label.is_some()
+        || aws_kms_tls_key_id.is_some()
+        || gcp_kms_tls_key_version.is_some();
     let has_exported_tls_key = tls_key.is_some();
     validate_tls_signing_exclusivity(has_delegated_tls, has_exported_tls_key)?;
 
@@ -1014,6 +1040,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         aws_kms_tls_key_id,
         gcp_kms_key_version,
         gcp_kms_endpoint,
+        gcp_kms_tls_key_version,
         gcp_kms_use_metadata,
         limits,
         max_client_cert_lifetime,
@@ -1447,15 +1474,42 @@ pub fn build_key_source(config: &Config) -> Result<Box<dyn KeySource>, KeyError>
                 &kms_config,
                 config.gcp_kms_use_metadata,
             )?;
-            Ok(Box::new(crate::kms_keysource::KmsKeySource::new(
-                Box::new(backend),
-                FileKeySource {
-                    signing_key_seed_path: config.signing_key_seed.clone(),
-                    tls_cert_path: config.tls_cert.clone(),
-                    tls_key_path: config.tls_key.clone(),
-                    client_ca_path: config.client_ca.clone(),
-                },
-            )))
+            let tls = FileKeySource {
+                signing_key_seed_path: config.signing_key_seed.clone(),
+                tls_cert_path: config.tls_cert.clone(),
+                tls_key_path: config.tls_key.clone(),
+                client_ca_path: config.client_ca.clone(),
+            };
+            // #61: a configured TLS-key-version custodies the TLS server key in a
+            // SECOND, DISTINCT Cloud KMS key version (independent of the
+            // object-signing key). Its own `GcpKmsEd25519Backend` (same
+            // endpoint/token source, the TLS key-version) drives the delegated TLS
+            // handshake signature; the proxy then never reads `--tls-key` from disk
+            // (the exclusivity guard already forbade it). `None` keeps the
+            // file-backed TLS path.
+            match &config.gcp_kms_tls_key_version {
+                Some(tls_key_version) => {
+                    let tls_kms_config = crate::gcp_kms_keysource::GcpKmsConfig {
+                        key_version_name: tls_key_version.clone(),
+                        endpoint: config.gcp_kms_endpoint.clone(),
+                    };
+                    let tls_backend = crate::gcp_kms_keysource::GcpKmsEd25519Backend::new(
+                        &tls_kms_config,
+                        config.gcp_kms_use_metadata,
+                    )?;
+                    Ok(Box::new(
+                        crate::kms_keysource::KmsKeySource::new_with_delegated_tls(
+                            Box::new(backend),
+                            tls,
+                            std::sync::Arc::new(tls_backend),
+                        ),
+                    ))
+                }
+                None => Ok(Box::new(crate::kms_keysource::KmsKeySource::new(
+                    Box::new(backend),
+                    tls,
+                ))),
+            }
         }
         #[cfg(not(feature = "gcp_kms_keysource"))]
         KeySourceKind::GcpKms => Err(KeyError::NotFound(
@@ -3003,6 +3057,89 @@ mod tests {
         a.splice(0..0, args(&["--gcp-kms-use-metadata"]));
         let err = parse_args(&a).unwrap_err();
         assert!(err.contains("--gcp-kms-use-metadata"), "got: {err}");
+    }
+
+    /// #61: GCP Cloud KMS leading flags WITHOUT `--tls-key` (delegated TLS path),
+    /// `--inner-command` appended last so proxy flags land before the inner tail.
+    fn gcp_kms_lead_no_tls_key() -> Vec<String> {
+        args(&[
+            "--bind", "127.0.0.1:8443",
+            "--audience", "did:example:server-1",
+            "--server-signer", "did:example:server-1",
+            "--server-key-id", "server-key-1",
+            "--key-source", "gcp-kms",
+            "--gcp-kms-key-version",
+            "projects/p/locations/global/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1",
+            "--signing-key-seed", "/unused-seed",
+            "--tls-cert", "/cert",
+            "--client-ca", "/ca",
+            "--trust", "/trust.json",
+        ])
+    }
+
+    /// #61: `--gcp-kms-tls-key-version` parses and is captured as the SECOND,
+    /// distinct TLS KMS key version. On this delegated path `--tls-key` is forbidden
+    /// and not required, so the lead omits the exported TLS key.
+    #[test]
+    fn parses_gcp_kms_tls_key_version_flag() {
+        let mut a = gcp_kms_lead_no_tls_key();
+        a.push("--gcp-kms-tls-key-version".to_string());
+        a.push(
+            "projects/p/locations/global/keyRings/r/cryptoKeys/k/cryptoKeyVersions/2".to_string(),
+        );
+        a.push("--inner-command".to_string());
+        a.push("my-server".to_string());
+        let config = parse_args(&a).expect("delegated TLS path parses without --tls-key");
+        assert_eq!(config.key_source, KeySourceKind::GcpKms);
+        assert_eq!(
+            config.gcp_kms_tls_key_version.as_deref(),
+            Some("projects/p/locations/global/keyRings/r/cryptoKeys/k/cryptoKeyVersions/2"),
+        );
+        // Distinct credential: the TLS key version differs from the object-signing
+        // key version.
+        assert_ne!(config.gcp_kms_tls_key_version, config.gcp_kms_key_version);
+    }
+
+    /// #61 / #58: `--gcp-kms-tls-key-version` (delegated) PLUS an exported
+    /// `--tls-key` is contradictory and must fail closed (the exclusivity guard).
+    #[test]
+    fn gcp_kms_tls_key_version_plus_exported_tls_key_fails_closed() {
+        // minimal() carries an exported `--tls-key`; adding a delegated TLS key
+        // version alongside it must be rejected.
+        let mut a = minimal();
+        a.splice(0..0, gcp_kms_flags());
+        a.splice(
+            0..0,
+            args(&[
+                "--gcp-kms-tls-key-version",
+                "projects/p/locations/global/keyRings/r/cryptoKeys/k/cryptoKeyVersions/2",
+            ]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(
+            err.contains("delegated") || err.contains("--tls-key"),
+            "expected an exclusivity error, got: {err}"
+        );
+    }
+
+    /// #61: a dangling `--gcp-kms-tls-key-version` on a non-GCP source would silently
+    /// do nothing (a false belief the TLS key is KMS-resident), so it must fail
+    /// closed.
+    #[test]
+    fn gcp_kms_tls_key_version_without_gcp_kms_fails_closed() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--gcp-kms-tls-key-version",
+                "projects/p/locations/global/keyRings/r/cryptoKeys/k/cryptoKeyVersions/2",
+            ]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(
+            err.contains("--gcp-kms-tls-key-version has no effect without --key-source gcp-kms"),
+            "got: {err}"
+        );
     }
 
     #[test]

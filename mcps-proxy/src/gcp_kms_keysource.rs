@@ -33,6 +33,7 @@ use mcps_core::verify_ed25519;
 use mcps_core::VerificationKey;
 use zeroize::Zeroizing;
 
+use crate::delegated_tls::RawEd25519TlsSigner;
 use crate::key_source::KeyError;
 use crate::kms_keysource::ed25519_raw_point_from_spki;
 use crate::kms_keysource::KmsEd25519Backend;
@@ -375,6 +376,67 @@ impl GcpKmsEd25519Backend {
         let client = UreqGcpClient::new(token_source, config);
         Self::with_transport(Box::new(client))
     }
+
+    /// TEST-ONLY (issue #61): build a backend over an in-memory FAKE Cloud KMS
+    /// transport backed by the LOCAL Ed25519 key with the given 32-byte `seed`, so an
+    /// integration test (`tests/tls_test.rs`) can drive the full delegated-TLS mTLS
+    /// handshake against a GCP backend with NO network and NO GCP credentials. The
+    /// fake transport answers `getPublicKey` with the key's RFC 8410 Ed25519 SPKI
+    /// (PEM-wrapped) and `asymmetricSign` with a PureEdDSA RAW signature over the raw
+    /// `data` — exactly what a real Cloud KMS `EC_SIGN_ED25519` key version returns.
+    /// There is NO production code path into this; it exists only to make the
+    /// crate-internal fake-transport reachable from the integration test that mints a
+    /// matching server certificate from the same `seed`.
+    #[doc(hidden)]
+    pub fn for_test_with_local_seed(seed: &[u8; 32]) -> Result<Self, KeyError> {
+        let transport = LocalKeyGcpTransport {
+            key: mcps_core::SigningKey::from_seed_bytes(seed),
+        };
+        Self::with_transport(Box::new(transport))
+    }
+}
+
+/// TEST-ONLY in-memory [`GcpKmsTransport`] backed by a LOCAL Ed25519 key — the same
+/// fake-Cloud-KMS shape used by this module's unit tests, exposed (only via the
+/// `#[doc(hidden)]` [`GcpKmsEd25519Backend::for_test_with_local_seed`]) so the
+/// delegated-TLS handshake integration test can use a real GCP backend with no
+/// network. NOT reachable from any production path.
+#[doc(hidden)]
+struct LocalKeyGcpTransport {
+    key: mcps_core::SigningKey,
+}
+
+impl GcpKmsTransport for LocalKeyGcpTransport {
+    fn get_public_key(&self) -> Result<Vec<u8>, KeyError> {
+        let mut der = crate::kms_keysource::ED25519_SPKI_PREFIX.to_vec();
+        der.extend_from_slice(&self.key.public_key().to_bytes());
+        let b64 = STANDARD.encode(&der);
+        let mut pem = String::from("-----BEGIN PUBLIC KEY-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(&String::from_utf8_lossy(chunk));
+            pem.push('\n');
+        }
+        pem.push_str("-----END PUBLIC KEY-----\n");
+        Ok(serde_json::json!({
+            "algorithm": ALGORITHM_ED25519,
+            "pem": pem,
+        })
+        .to_string()
+        .into_bytes())
+    }
+
+    fn asymmetric_sign(&self, body: &[u8]) -> Result<Vec<u8>, KeyError> {
+        let v: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|e| KeyError::Malformed(format!("fake gcp kms: sign body: {e}")))?;
+        let data = STANDARD
+            .decode(v.get("data").and_then(|d| d.as_str()).unwrap_or(""))
+            .map_err(|e| KeyError::Malformed(format!("fake gcp kms: data b64: {e}")))?;
+        let raw = mcps_core::b64url_decode(&self.key.sign(&data))
+            .map_err(|e| KeyError::Malformed(format!("fake gcp kms: sign: {e}")))?;
+        Ok(serde_json::json!({ "signature": STANDARD.encode(&raw) })
+            .to_string()
+            .into_bytes())
+    }
 }
 
 impl KmsEd25519Backend for GcpKmsEd25519Backend {
@@ -402,6 +464,34 @@ impl KmsEd25519Backend for GcpKmsEd25519Backend {
     }
 
     fn public_key_spki_der(&self) -> Result<Vec<u8>, KeyError> {
+        Ok(self.spki_der.clone())
+    }
+}
+
+/// Delegated TLS handshake signing through GCP Cloud KMS (issue #61, ADR-MCPS-028 §G).
+///
+/// The TLS *server* key is a SECOND, DISTINCT Cloud KMS key VERSION (a separate
+/// `key_version_name` and — the operator SHOULD give it — a distinct IAM policy)
+/// from the object-signing key, custodied by its own [`GcpKmsEd25519Backend`]. The
+/// TLS handshake signature is produced by the SAME RAW-Ed25519 `asymmetricSign` path
+/// used for response signing (`EC_SIGN_ED25519`, PureEdDSA over the raw `data`, NOT a
+/// digest), so the TLS private key never leaves Cloud KMS.
+///
+/// rustls verifies the handshake `CertificateVerify` it gets back, and the validated
+/// delegated build path (#58) both enforces the 64-byte length and fails closed when
+/// the (exportable, cached) public key here does not match the leaf TLS certificate —
+/// so verify-before-return is NOT repeated on this path (it stays on the
+/// object-signing `sign_raw_ed25519` path, which is reused unchanged).
+impl RawEd25519TlsSigner for GcpKmsEd25519Backend {
+    fn sign_tls_ed25519(&self, message: &[u8]) -> Result<Vec<u8>, KeyError> {
+        // Reuse the object-signing RAW-Ed25519 Cloud KMS `asymmetricSign` path
+        // verbatim over the handshake transcript, length-checked + verified.
+        self.sign_raw_ed25519(message)
+    }
+
+    fn tls_public_key_spki_der(&self) -> Result<Vec<u8>, KeyError> {
+        // The advertised Cloud KMS public key, fetched + validated as Ed25519 at
+        // construction; the #58 build path matches it against the leaf TLS cert.
         Ok(self.spki_der.clone())
     }
 }
@@ -528,5 +618,30 @@ mod tests {
             .sign_raw_ed25519(b"mcps canonical response preimage")
             .expect_err("must fail closed");
         assert!(matches!(err, KeyError::Malformed(_)));
+    }
+
+    /// Issue #61 (test a): the GCP backend AS a [`RawEd25519TlsSigner`] signs a TLS
+    /// handshake transcript over the fake Cloud KMS transport, returning a raw
+    /// 64-byte signature that VERIFIES under the SPKI it reports — the exact
+    /// assertion the validated #58 build path and rustls rely on. The TLS sign path
+    /// reuses the object-signing RAW-Ed25519 `asymmetricSign`.
+    #[test]
+    fn gcp_backend_tls_sign_verifies_under_reported_spki() {
+        let backend = GcpKmsEd25519Backend::with_transport(Box::new(FakeGcp {
+            key: SigningKey::from_seed_bytes(&[24u8; 32]),
+            prehash: false,
+        }))
+        .expect("construct");
+        let transcript = b"tls handshake transcript bytes";
+        let sig = backend.sign_tls_ed25519(transcript).expect("tls sign");
+        assert_eq!(
+            sig.len(),
+            64,
+            "delegated TLS signature is a raw 64-byte Ed25519 sig"
+        );
+        // The reported SPKI is the advertised Cloud KMS public key and verifies it.
+        let raw = ed25519_raw_point_from_spki(&backend.tls_public_key_spki_der().unwrap()).unwrap();
+        let key = VerificationKey::from_bytes(&raw).unwrap();
+        verify_ed25519(transcript, &b64url_encode(&sig), &key).expect("tls sig verifies");
     }
 }

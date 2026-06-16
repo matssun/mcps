@@ -933,11 +933,11 @@ fn validated_delegated_build_rejects_non_ed25519_leaf() {
 // aws_kms_keysource`.
 // ---------------------------------------------------------------------------
 
-/// Mint an Ed25519 server leaf signed by `ca` from a FIXED 32-byte seed, so an AWS
+/// Mint an Ed25519 server leaf signed by `ca` from a FIXED 32-byte seed, so a cloud
 /// KMS backend constructed from the SAME seed advertises the leaf's public key
 /// (cert↔signer match). Mirrors `make_ed25519_server_leaf` but with a deterministic
 /// key so the KMS-side key and the certificate key are guaranteed identical.
-#[cfg(feature = "aws_kms_keysource")]
+#[cfg(any(feature = "aws_kms_keysource", feature = "gcp_kms_keysource"))]
 fn make_ed25519_server_leaf_from_seed(ca: &Ca, seed: &[u8; 32]) -> CertificateDer<'static> {
     // RFC 8410 PKCS#8 v1 for an Ed25519 private key carrying exactly this seed:
     // SEQUENCE { version 0, AlgorithmIdentifier { id-Ed25519 }, OCTET STRING {
@@ -1125,6 +1125,180 @@ fn aws_kms_delegated_build_rejects_mismatch_and_non_ed25519_leaf() {
         false,
     )
     .expect_err("a non-Ed25519 leaf must fail closed under AWS-delegated mode");
+    assert!(
+        matches!(err, mcps_proxy::TlsError::DelegatedKeyMismatch(_)),
+        "expected DelegatedKeyMismatch (Ed25519-only), got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADR-MCPS-028 §G / issue #61: GCP Cloud KMS delegated TLS handshake signing. The
+// server's TLS key is a SECOND, DISTINCT Cloud KMS key version; a
+// `GcpKmsEd25519Backend` (over an in-memory FAKE Cloud KMS transport backed by a
+// local Ed25519 key — no network, no GCP credentials) signs each handshake via the
+// RAW-Ed25519 `asymmetricSign` path. A real full-WebPKI client completing the mTLS
+// handshake PROVES the delegated KMS signature is wire-correct. These tests run only
+// under `--features gcp_kms_keysource`.
+// ---------------------------------------------------------------------------
+
+/// (c) #61: a full-WebPKI in-process mTLS handshake whose delegated signer is a GCP
+/// Cloud KMS backend (over a fake transport) keyed to MATCH the server leaf cert.
+/// The validating client completes the handshake only if the KMS-signed
+/// `CertificateVerify` is cryptographically valid — proving the GCP RAW-Ed25519
+/// `asymmetricSign` is wire-correct end to end. Corrupting the fake KMS signature
+/// breaks the handshake.
+#[cfg(feature = "gcp_kms_keysource")]
+#[test]
+fn gcp_kms_delegated_tls_handshake_round_trip_and_corruption_fails() {
+    let seed = [0x42u8; 32];
+    let client_ca = make_ca();
+    let server_ca = make_ca();
+    let server_cert = make_ed25519_server_leaf_from_seed(&server_ca, &seed);
+    let backend = mcps_proxy::GcpKmsEd25519Backend::for_test_with_local_seed(&seed)
+        .expect("gcp kms backend over fake transport");
+
+    let config = std::sync::Arc::new(
+        mcps_proxy::build_server_config_delegated_validated(
+            vec![server_cert],
+            std::sync::Arc::new(backend),
+            vec![client_ca.cert.der().clone()],
+            Vec::new(),
+            false,
+        )
+        .expect("validated delegated config with the matching KMS TLS key must build"),
+    );
+
+    let (client_cert, client_key) = make_leaf(
+        &client_ca,
+        vec![uri("spiffe://example.org/agent-1")],
+        None,
+        true,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = thread::spawn(move || {
+        serve_once(
+            &listener,
+            config,
+            &ServerOptions::default(),
+            |request, _id| {
+                assert_eq!(request, b"{\"jsonrpc\":\"2.0\"}");
+                b"{\"ok\":true}".to_vec()
+            },
+        )
+    });
+    let response = client_round_trip(
+        addr,
+        client_config_validating(
+            server_ca.cert.der().clone(),
+            (vec![client_cert], client_key),
+        ),
+        b"{\"jsonrpc\":\"2.0\"}",
+    )
+    .expect("client round trip over a GCP-KMS-delegated handshake");
+    assert_eq!(response, b"{\"ok\":true}");
+    let _ = server.join().expect("join").expect("serve ok");
+
+    // Corrupt the KMS signature → the validating client's CertificateVerify check
+    // fails the handshake. The wrapper keeps the SAME public key (so the cert↔signer
+    // build check passes; the BREAK is the bad signature on the wire).
+    struct CorruptingGcpKms(mcps_proxy::GcpKmsEd25519Backend);
+    impl mcps_proxy::RawEd25519TlsSigner for CorruptingGcpKms {
+        fn sign_tls_ed25519(&self, message: &[u8]) -> Result<Vec<u8>, mcps_proxy::KeyError> {
+            let mut sig = self.0.sign_tls_ed25519(message)?;
+            sig[0] ^= 0x01;
+            Ok(sig)
+        }
+        fn tls_public_key_spki_der(&self) -> Result<Vec<u8>, mcps_proxy::KeyError> {
+            self.0.tls_public_key_spki_der()
+        }
+    }
+
+    let seed2 = [0x7Eu8; 32];
+    let client_ca2 = make_ca();
+    let server_ca2 = make_ca();
+    let server_cert2 = make_ed25519_server_leaf_from_seed(&server_ca2, &seed2);
+    let backend2 = mcps_proxy::GcpKmsEd25519Backend::for_test_with_local_seed(&seed2)
+        .expect("gcp kms backend 2");
+    let config2 = std::sync::Arc::new(
+        mcps_proxy::build_server_config_delegated_validated(
+            vec![server_cert2],
+            std::sync::Arc::new(CorruptingGcpKms(backend2)),
+            vec![client_ca2.cert.der().clone()],
+            Vec::new(),
+            false,
+        )
+        .expect("build succeeds: public key matches; the BREAK is the corrupted signature"),
+    );
+    let (client_cert2, client_key2) = make_leaf(
+        &client_ca2,
+        vec![uri("spiffe://example.org/agent-1")],
+        None,
+        true,
+    );
+    let listener2 = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr2 = listener2.local_addr().expect("addr");
+    let server2 = thread::spawn(move || {
+        serve_once(
+            &listener2,
+            config2,
+            &ServerOptions::default(),
+            |_req, _id| b"{\"ok\":true}".to_vec(),
+        )
+    });
+    let result = client_round_trip(
+        addr2,
+        client_config_validating(
+            server_ca2.cert.der().clone(),
+            (vec![client_cert2], client_key2),
+        ),
+        b"{\"jsonrpc\":\"2.0\"}",
+    );
+    assert!(
+        result.is_err(),
+        "a corrupted GCP-KMS delegated signature MUST fail the validating handshake"
+    );
+    let _ = server2.join();
+}
+
+/// (d) #61: a GCP KMS backend whose key does NOT match the leaf cert must FAIL
+/// CLOSED at config construction (cert↔signer mismatch), and a non-Ed25519 (ECDSA)
+/// leaf under the GCP-delegated path is likewise rejected (Ed25519-only).
+#[cfg(feature = "gcp_kms_keysource")]
+#[test]
+fn gcp_kms_delegated_build_rejects_mismatch_and_non_ed25519_leaf() {
+    let client_ca = make_ca();
+    let server_ca = make_ca();
+
+    // Mismatch: leaf minted from one seed, KMS backend keyed to a DIFFERENT seed.
+    let leaf = make_ed25519_server_leaf_from_seed(&server_ca, &[0x11u8; 32]);
+    let mismatched = mcps_proxy::GcpKmsEd25519Backend::for_test_with_local_seed(&[0x22u8; 32])
+        .expect("gcp kms backend");
+    let err = mcps_proxy::build_server_config_delegated_validated(
+        vec![leaf],
+        std::sync::Arc::new(mismatched),
+        vec![client_ca.cert.der().clone()],
+        Vec::new(),
+        false,
+    )
+    .expect_err("a cert↔KMS-key mismatch must fail closed at config construction");
+    assert!(
+        matches!(err, mcps_proxy::TlsError::DelegatedKeyMismatch(_)),
+        "expected DelegatedKeyMismatch, got {err:?}"
+    );
+
+    // Non-Ed25519 leaf (ECDSA P-256): the leaf SPKI is rejected first (Ed25519-only).
+    let ecdsa_leaf = make_ecdsa_server_leaf(&server_ca);
+    let backend = mcps_proxy::GcpKmsEd25519Backend::for_test_with_local_seed(&[0x33u8; 32])
+        .expect("gcp kms backend");
+    let err = mcps_proxy::build_server_config_delegated_validated(
+        vec![ecdsa_leaf],
+        std::sync::Arc::new(backend),
+        vec![client_ca.cert.der().clone()],
+        Vec::new(),
+        false,
+    )
+    .expect_err("a non-Ed25519 leaf must fail closed under GCP-delegated mode");
     assert!(
         matches!(err, mcps_proxy::TlsError::DelegatedKeyMismatch(_)),
         "expected DelegatedKeyMismatch (Ed25519-only), got {err:?}"
