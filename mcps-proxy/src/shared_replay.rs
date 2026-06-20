@@ -32,8 +32,11 @@
 //!     it proves the cross-instance property only within one process (two
 //!     `SharedReplayCache` over one cloned `Arc`).
 //!   * `RedisAtomicReplayStore`
-//!     ([`crate::redis_store`](crate::redis_store), compiled ONLY under the
-//!     non-default `redis_replay` cargo feature) — a REAL server-side-atomic
+//!     (in the `redis_store` module, compiled ONLY under the non-default
+//!     `redis_replay` cargo feature — written as inline code, NOT an intra-doc
+//!     link, since that module is absent from the default-feature doc build and
+//!     a link would be an unresolved `broken_intra_doc_links`) — a REAL
+//!     server-side-atomic
 //!     shared backend (Redis `SET NX PX`) wired by `cli.rs` for
 //!     `--replay-cache shared`, giving genuine cross-process/cross-node replay
 //!     safety.
