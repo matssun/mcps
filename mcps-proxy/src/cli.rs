@@ -213,7 +213,7 @@ pub struct Config {
     /// `--revocation-list` value (comma-separated and/or repeated) adds a file of
     /// newline-delimited revoked `revocation_id`s. Loaded once at startup (OFFLINE
     /// only — restart to update). Empty means no grant deny-list is configured;
-    /// under `--authz reference` that requires the explicit `allow_empty_revocation`
+    /// under `--authz reference` that requires the explicit `--allow-empty-revocation`
     /// acknowledgement (otherwise the proxy refuses to start — fail closed).
     pub revocation_list_paths: Vec<String>,
     /// Explicit acknowledgement that `--authz reference` may run with NO policy
