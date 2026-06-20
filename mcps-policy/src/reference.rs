@@ -218,13 +218,17 @@ fn verify_issuer_signature(
     .map_err(|_| PolicyError::AuthorizationSignatureInvalid)
 }
 
-/// Strict `[not_before, expires_at]` window check; malformed timestamps fail
-/// closed as [`PolicyError::AuthorizationExpired`].
+/// Strict `[not_before, expires_at]` window check. An UNPARSEABLE timestamp is a
+/// structural/malformedness defect, not a freshness verdict, so it fails closed
+/// as [`PolicyError::AuthorizationMalformed`] (the taxonomy's token for "artifact
+/// bytes do not parse into the profile's expected shape"); only a well-formed
+/// timestamp that places `now` outside the window yields
+/// [`PolicyError::AuthorizationExpired`].
 fn check_window(grant: &ReferenceGrant, now_unix: i64) -> Result<(), PolicyError> {
     let not_before =
-        parse_rfc3339_utc(&grant.not_before).map_err(|_| PolicyError::AuthorizationExpired)?;
+        parse_rfc3339_utc(&grant.not_before).map_err(|_| PolicyError::AuthorizationMalformed)?;
     let expires_at =
-        parse_rfc3339_utc(&grant.expires_at).map_err(|_| PolicyError::AuthorizationExpired)?;
+        parse_rfc3339_utc(&grant.expires_at).map_err(|_| PolicyError::AuthorizationMalformed)?;
     if now_unix < not_before || now_unix > expires_at {
         return Err(PolicyError::AuthorizationExpired);
     }
@@ -566,6 +570,30 @@ mod tests {
         assert_eq!(
             decision,
             AuthorizationDecision::Deny(PolicyError::AuthorizationExpired)
+        );
+    }
+
+    /// A grant whose timestamp is well-formed JSON but NOT a parseable RFC 3339
+    /// instant is a structural malformedness defect, not a freshness verdict: it
+    /// must deny with `authorization_malformed`, never `authorization_expired`
+    /// (which is reserved for `now` outside a well-formed window). The timestamp
+    /// is inside the signed preimage, so the signature still verifies and
+    /// evaluation reaches `check_window`.
+    #[test]
+    fn unparseable_timestamp_is_malformed_not_expired() {
+        let mut spec = default_spec();
+        spec.expires_at = "not-a-timestamp".to_string();
+        let artifact = mint_reference_grant(&spec, &issuer_key(), ISSUER_KEY_ID).unwrap();
+        let verified = verified_for(&artifact);
+        let decision = authorize(
+            &artifact,
+            &verified,
+            &echo_request(),
+            &InMemoryRevocationSource::new(),
+        );
+        assert_eq!(
+            decision,
+            AuthorizationDecision::Deny(PolicyError::AuthorizationMalformed)
         );
     }
 
