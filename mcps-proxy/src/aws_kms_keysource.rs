@@ -166,10 +166,12 @@ impl KmsHttpClient for UreqKmsClient {
                 // and fail closed if the body exceeds the cap.
                 let mut buf = Vec::new();
                 resp.into_reader()
-                    .take(MAX_KMS_RESPONSE_BYTES)
+                    // Read cap+1 so a body whose length is EXACTLY the cap is
+                    // accepted; only a body strictly larger (len > cap) is rejected.
+                    .take(MAX_KMS_RESPONSE_BYTES + 1)
                     .read_to_end(&mut buf)
                     .map_err(|e| KeyError::NotFound(format!("aws-kms: read response body: {e}")))?;
-                if buf.len() as u64 >= MAX_KMS_RESPONSE_BYTES {
+                if buf.len() as u64 > MAX_KMS_RESPONSE_BYTES {
                     return Err(KeyError::Malformed(format!(
                         "aws-kms: response body exceeds {MAX_KMS_RESPONSE_BYTES}-byte cap"
                     )));
