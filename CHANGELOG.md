@@ -9,6 +9,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
 or wire-format compatibility while the design lines from
 [`docs/adr/`](docs/adr/) settle.
 
+## [0.3.1] — 2026-06-21
+
+Security-hardening patch release. No API or wire-format change relative to
+0.3.0 — every change is a defensive fix or documentation correction surfaced by
+the **Stage 1–2 security-audit funnel** (deterministic pre-scan + 3-lens review,
+without the verify gate). Findings were triaged file-by-file: 10 fixed with
+regression tests, 3 closed as false positives, and the remaining cluster
+deferred to the v0.4 hardening epic (#68) as intentional ADR-MCPS-017
+single-node-ceiling posture. The full verified (3-skeptic) scan is scheduled for
+v0.4.
+
+### Security
+
+- **OCSP delegated-responder validity window (#95, RFC 6960).** A delegated
+  responder certificate presented outside its `notBefore`/`notAfter` window is
+  now rejected instead of trusted.
+- **Authorization-grant timestamp taxonomy (#88).** An unparseable RFC 3339
+  expiry on a delegated grant now fails as `AuthorizationMalformed` rather than
+  being misclassified as `AuthorizationExpired`.
+- **JCS duplicate-key invariant (#74).** A hand-built `JcsValue::Object`
+  containing duplicate keys now fails closed (`CanonicalizationFailed`) rather
+  than producing an ambiguous canonical form.
+- **Injective trust-resolver composite key (#79).** `InMemoryTrustResolver`
+  composes its lookup key with a length-prefixed encoding, removing a
+  delimiter-collision class across `(signer, key_id)` pairs.
+- **Bounded KMS response reads (#89, #92).** The AWS-KMS response body is read
+  under an explicit byte cap (reject only when the length exceeds the cap), and
+  GCP-KMS token-expiry arithmetic saturates on overflow instead of panicking.
+
+### Fixed
+
+- **Freshness-window overflow (#82).** Freshness-window expiry uses
+  `checked_add`, failing closed instead of panicking on `i64` overflow.
+- **Replay prune boundary (#91).** Durable-replay pruning is now inclusive at
+  `retain_until` (`>=`), matching the in-memory store and removing a one-tick
+  off-by-one retention gap.
+- **Response taxonomy precision (#77).** `verify_response` rejects batch and
+  notification shapes *before* canonicalization, restoring symmetry with
+  `verify_request`.
+
+### Documentation
+
+- Corrected a stale `shared_replay` module doc and documented the
+  `sandbox_linux` `try_clone` async-signal-safety caveat (#99, #98).
+
 ## [0.3.0] — 2026-06-16
 
 This release adds the **tiered multi-node profile within one trust domain**
@@ -237,6 +282,7 @@ state of the codebase at this point.
   all are closed in v0.2.0 per the
   [v0.2 remediation log](docs/security/remediation-v0.2.md).
 
+[0.3.1]: https://github.com/matssun/mcps/releases/tag/v0.3.1
 [0.3.0]: https://github.com/matssun/mcps/releases/tag/v0.3.0
 [0.2.0]: https://github.com/matssun/mcps/releases/tag/v0.2.0
 [0.1.0]: https://github.com/matssun/mcps/releases/tag/v0.1.0
