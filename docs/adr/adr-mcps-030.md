@@ -51,9 +51,9 @@ code and a rejected design.
    tracking issues for the relocated work (#84, #86, #87, #118) are closed against
    MCP-S and continue (redesigned) in the MTCI repository.
 
-This **amends the deferred-follow-ups list in ADR-MCPS-017**: "signed tool
-manifests" is no longer a deferred *MCP-S* follow-up — it is excluded from MCP-S
-entirely and lives in MTCI.
+This clarifies the relationship to ADR-MCPS-017's deferred-follow-ups list:
+"signed tool manifests" are excluded from MCP-S entirely and live in MTCI.
+(ADR-MCPS-017 should be updated to remove "signed tool manifests" from its deferred list to keep the ADR set consistent.)
 
 ## Proposal boundary (non-goal text)
 
