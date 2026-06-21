@@ -84,6 +84,18 @@ impl GcpAccessTokenSource for EnvAccessTokenSource {
     }
 }
 
+/// Compute a token expiry `expires_in` seconds after `now`, saturating closed.
+///
+/// `SystemTime`'s `Add<Duration>` panics on overflow, and `expires_in` comes from
+/// the (operator-overridable, plaintext-by-default) metadata server. A hostile
+/// near-`u64::MAX` value must not panic the blocking serve thread; on overflow we
+/// clamp to `now`, which makes the cached token appear already-expired and forces
+/// an immediate refresh on the next use — fail closed, never panic.
+fn expiry_from_now(now: SystemTime, expires_in: u64) -> SystemTime {
+    now.checked_add(Duration::from_secs(expires_in))
+        .unwrap_or(now)
+}
+
 /// The GCE/GKE metadata server (workload identity). Fetches a token and caches it
 /// until shortly before its stated expiry.
 pub(crate) struct MetadataServerTokenSource {
@@ -158,9 +170,14 @@ impl GcpAccessTokenSource for MetadataServerTokenSource {
             .cache
             .lock()
             .map_err(|e| KeyError::NotFound(format!("gcp-kms: token cache poisoned: {e}")))?;
+        // `expires_in` is attacker-influenceable (the metadata endpoint is
+        // overridable and plaintext-HTTP by default), and `SystemTime`'s
+        // `Add<Duration>` panics on overflow. `expiry_from_now` uses `checked_add`
+        // and treats a near-`u64::MAX` value as already-expired (clamp to `now`,
+        // forcing an immediate refresh) rather than panicking the serve thread.
         *cache = Some(CachedToken {
             token: token.clone(),
-            expires_at: now + Duration::from_secs(expires_in),
+            expires_at: expiry_from_now(now, expires_in),
         });
         Ok(token)
     }
@@ -516,6 +533,20 @@ mod tests {
         }
         pem.push_str("-----END PUBLIC KEY-----\n");
         pem
+    }
+
+    /// A hostile near-`u64::MAX` `expires_in` from the metadata server must NOT
+    /// panic `SystemTime + Duration`; it clamps to `now` (already-expired), and a
+    /// sane value adds normally. Regression for the panic-on-overflow finding.
+    #[test]
+    fn expiry_from_now_saturates_on_overflow() {
+        let now = SystemTime::now();
+        // Overflow: clamps to `now` rather than panicking.
+        assert_eq!(expiry_from_now(now, u64::MAX), now);
+        // Near-max also clamps (Duration::from_secs(u64::MAX) + epoch overflows).
+        assert_eq!(expiry_from_now(now, u64::MAX - 1), now);
+        // Sane value adds normally.
+        assert_eq!(expiry_from_now(now, 3600), now + Duration::from_secs(3600));
     }
 
     #[test]

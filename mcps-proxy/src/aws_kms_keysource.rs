@@ -39,6 +39,12 @@ const KMS_CONTENT_TYPE: &str = "application/x-amz-json-1.1";
 const TARGET_GET_PUBLIC_KEY: &str = "TrentService.GetPublicKey";
 const TARGET_SIGN: &str = "TrentService.Sign";
 
+/// Upper bound on a KMS success-path response body (matches the GCP sibling's
+/// `read_body` cap). A `GetPublicKey`/`Sign` JSON response is well under a KB; the
+/// cap exists so an operator-overridable / substituted endpoint cannot stream an
+/// unbounded body into the blocking signing thread.
+const MAX_KMS_RESPONSE_BYTES: u64 = 256 * 1024;
+
 /// The single Ed25519 key spec and signing mode this adapter accepts.
 const KEY_SPEC_ED25519: &str = "ECC_NIST_EDWARDS25519";
 const SIGNING_ALGORITHM_ED25519: &str = "ED25519_SHA_512";
@@ -152,10 +158,24 @@ impl KmsHttpClient for UreqKmsClient {
         // body is surfaced for diagnosis.
         match req.send_bytes(body) {
             Ok(resp) => {
+                // Bound the success-path read: the KMS endpoint is operator-
+                // overridable (`--aws-kms-endpoint`), so a substituted/MITM endpoint
+                // could otherwise stream an arbitrarily large body and drive unbounded
+                // memory growth on the blocking signing thread. A GetPublicKey/Sign
+                // JSON response is well under a KB; cap at 256 KiB like the GCP sibling
+                // and fail closed if the body exceeds the cap.
                 let mut buf = Vec::new();
                 resp.into_reader()
+                    // Read cap+1 so a body whose length is EXACTLY the cap is
+                    // accepted; only a body strictly larger (len > cap) is rejected.
+                    .take(MAX_KMS_RESPONSE_BYTES + 1)
                     .read_to_end(&mut buf)
                     .map_err(|e| KeyError::NotFound(format!("aws-kms: read response body: {e}")))?;
+                if buf.len() as u64 > MAX_KMS_RESPONSE_BYTES {
+                    return Err(KeyError::Malformed(format!(
+                        "aws-kms: response body exceeds {MAX_KMS_RESPONSE_BYTES}-byte cap"
+                    )));
+                }
                 Ok(buf)
             }
             Err(ureq::Error::Status(code, resp)) => {
