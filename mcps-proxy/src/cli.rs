@@ -89,6 +89,12 @@ pub enum BindingKind {
     None,
     /// Exact match: request `signer` must equal the verified transport identity.
     Exact,
+    /// ADR-MCPS-023 Tier 3 (issue #71): the verified transport identity comes from
+    /// an LB-signed, request-bound ingress assertion (the node cryptographically
+    /// verifies the LB tied the asserted client identity to THIS request hash),
+    /// then binds exactly to the request signer. Honestly downgraded — NOT
+    /// `end_to_end_mtls`. Requires at least one `--ingress-lb-key`.
+    LbAssertion,
 }
 
 /// ONLINE client-cert OCSP revocation selection (#4030). The online sibling of
@@ -207,6 +213,12 @@ pub struct Config {
     /// identity string or Envoy XFCC). Only meaningful when
     /// `reverse_proxy_identity_header` is set.
     pub reverse_proxy_header_format: ReverseProxyHeaderFormat,
+    /// ADR-MCPS-023 Tier 3 (issue #71): the trusted LB verification keys for
+    /// LB-signed request-bound ingress assertions, as `(key_id, base64url-ed25519-pub)`
+    /// pairs from repeatable `--ingress-lb-key <keyid>:<base64-pub>`. Required (and
+    /// only meaningful) when `binding == LbAssertion`; an unknown asserted key id
+    /// fails closed. Empty for every other binding mode.
+    pub ingress_lb_keys: Vec<(String, String)>,
     /// Authorization-policy selection.
     pub authz: AuthzKind,
     /// Offline policy-layer revocation deny-list paths (ADR-MCPS-013). Each
@@ -364,6 +376,7 @@ const KNOWN_PROXY_FLAGS: &[&str] = &[
     "--transport-identity-source",
     "--reverse-proxy-identity-header",
     "--reverse-proxy-header-format",
+    "--ingress-lb-key",
     "--authz",
     "--revocation-list",
     "--allow-empty-revocation",
@@ -424,6 +437,9 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut identity_source = IdentityPolicy::UriSan;
     let mut reverse_proxy_identity_header: Option<String> = None;
     let mut reverse_proxy_header_format = ReverseProxyHeaderFormat::Xfcc;
+    // ADR-MCPS-023 Tier 3 (issue #71): repeatable trusted LB verification keys for
+    // request-bound ingress assertions, as (key_id, base64url-ed25519-pub) pairs.
+    let mut ingress_lb_keys: Vec<(String, String)> = Vec::new();
     let mut authz = AuthzKind::Off;
     // ADR-MCPS-013 policy-layer revocation: zero or more offline deny-list files,
     // plus an explicit acknowledgement to run authz with an empty deny-list.
@@ -643,8 +659,32 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
                 binding = match value.as_str() {
                     "none" => BindingKind::None,
                     "exact" => BindingKind::Exact,
-                    other => return Err(format!("unknown --transport-binding '{other}' (none|exact)")),
+                    // ADR-MCPS-023 Tier 3 (issue #71): LB-signed request-bound
+                    // ingress assertion. Honestly downgraded — NOT end_to_end_mtls.
+                    "lb-assertion" => BindingKind::LbAssertion,
+                    other => return Err(format!(
+                        "unknown --transport-binding '{other}' (none|exact|lb-assertion)"
+                    )),
                 }
+            }
+            // ADR-MCPS-023 Tier 3 (issue #71): a trusted LB verification key for
+            // request-bound ingress assertions, as `<keyid>:<base64url-ed25519-pub>`.
+            // Repeatable. The key id is the opaque label the assertion stamps; the
+            // base64url body MUST decode to a valid 32-byte Ed25519 public key (a
+            // malformed key is rejected when the binding is built). An unknown key
+            // id in a presented assertion fails closed at verification.
+            "--ingress-lb-key" => {
+                let (key_id, key_b64) = value.split_once(':').ok_or_else(|| {
+                    format!(
+                        "invalid --ingress-lb-key '{value}' (expected <keyid>:<base64url-ed25519-pub>)"
+                    )
+                })?;
+                if key_id.is_empty() || key_b64.is_empty() {
+                    return Err(format!(
+                        "invalid --ingress-lb-key '{value}' (empty key id or key body)"
+                    ));
+                }
+                ingress_lb_keys.push((key_id.to_string(), key_b64.to_string()));
             }
             "--transport-identity-source" => {
                 identity_source = match value.as_str() {
@@ -970,6 +1010,48 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         );
     }
 
+    // ADR-MCPS-023 Tier 3 (issue #71): LB-signed request-bound ingress assertion.
+    // Fail CLOSED at the CLI trust boundary so the operator can never believe a
+    // request-binding control is in force when it is not.
+    //
+    // (a) Dangling `--ingress-lb-key` without `--transport-binding lb-assertion`
+    //     would SILENTLY do nothing (an illusion of request-bound ingress). Reject
+    //     it — mirrors the OCSP/reverse-proxy dangling-flag guards.
+    if !ingress_lb_keys.is_empty() && binding != BindingKind::LbAssertion {
+        return Err(
+            "--ingress-lb-key has no effect without --transport-binding lb-assertion"
+                .to_string(),
+        );
+    }
+    // (b) `lb-assertion` binding with NO trusted LB key can never verify any
+    //     assertion — it would reject every request. Require at least one key.
+    if binding == BindingKind::LbAssertion && ingress_lb_keys.is_empty() {
+        return Err(
+            "--transport-binding lb-assertion requires at least one --ingress-lb-key \
+             <keyid>:<base64url-ed25519-pub> (the trusted LB verification key)"
+                .to_string(),
+        );
+    }
+    // (c) Each configured LB key must be a valid base64url 32-byte Ed25519 public
+    //     key, and key ids must be unique — a malformed key or duplicate id is a
+    //     misconfiguration, rejected at parse time rather than at first request.
+    {
+        let mut seen_ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (key_id, key_b64) in &ingress_lb_keys {
+            if !seen_ids.insert(key_id.as_str()) {
+                return Err(format!(
+                    "duplicate --ingress-lb-key id '{key_id}' (each LB key id must be unique)"
+                ));
+            }
+            if mcps_core::VerificationKey::from_b64url(key_b64).is_err() {
+                return Err(format!(
+                    "invalid --ingress-lb-key '{key_id}': the body must be a base64url-no-pad \
+                     32-byte Ed25519 public key"
+                ));
+            }
+        }
+    }
+
     // #4063 (MCPS-088) online-OCSP gating — fail CLOSED at the CLI trust boundary.
     // These arms ensure an operator can never believe an OCSP control is in force
     // when it is not, and that `require` is rejected outright in a build that
@@ -1065,6 +1147,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         identity_source,
         reverse_proxy_identity_header,
         reverse_proxy_header_format,
+        ingress_lb_keys,
         authz,
         revocation_list_paths,
         allow_empty_revocation,
@@ -1271,6 +1354,22 @@ pub fn strict_violations(config: &Config) -> Vec<String> {
             "--transport-binding none ignores the mTLS channel identity, decoupling the \
              verified request signer from the authenticated channel; production must bind \
              them (--transport-binding exact)"
+                .to_string(),
+        );
+    }
+    // ADR-MCPS-023 Tier 3 (issue #71): `--transport-binding lb-assertion` is a
+    // cryptographically request-bound ingress assertion, but the load balancer
+    // still terminates the client's mTLS and is in the trusted computing base —
+    // this is request-bound INGRESS assertion, NOT end-to-end client↔node binding
+    // (NOT end_to_end_mtls). Strict/production refuses to enable the downgraded
+    // posture silently, mirroring the trusted-ingress-header refusal above.
+    if config.binding == BindingKind::LbAssertion {
+        violations.push(
+            "--transport-binding lb-assertion places the load balancer in the trusted \
+             computing base (the LB terminates the client mTLS and signs a request-bound \
+             assertion); this is request-bound ingress assertion, NOT end-to-end \
+             client↔node mTLS; production must bind end-to-end (--transport-binding exact \
+             with locally-terminated client mTLS)"
                 .to_string(),
         );
     }
@@ -2854,6 +2953,128 @@ mod tests {
         assert!(parse_args(&a)
             .unwrap_err()
             .contains("non-empty header name"));
+    }
+
+    // ---- ADR-MCPS-023 Tier 3 (issue #71): LB-signed request-bound assertion ----
+
+    /// A valid base64url-no-pad 32-byte Ed25519 public key for `--ingress-lb-key`.
+    fn lb_pub_b64() -> String {
+        mcps_core::SigningKey::from_seed_bytes(&[5u8; 32])
+            .public_key()
+            .to_b64url()
+    }
+
+    #[test]
+    fn parses_lb_assertion_binding_with_key() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--transport-binding", "lb-assertion",
+                "--ingress-lb-key", &format!("lb-1:{}", lb_pub_b64()),
+            ]),
+        );
+        let config = parse_args(&a).expect("parse");
+        assert_eq!(config.binding, BindingKind::LbAssertion);
+        assert_eq!(config.ingress_lb_keys.len(), 1);
+        assert_eq!(config.ingress_lb_keys[0].0, "lb-1");
+    }
+
+    #[test]
+    fn lb_assertion_binding_requires_at_least_one_key() {
+        // `lb-assertion` with no trusted LB key can never verify any assertion —
+        // fail closed at parse time rather than reject every request.
+        let mut a = minimal();
+        a.splice(0..0, args(&["--transport-binding", "lb-assertion"]));
+        let err = parse_args(&a).unwrap_err();
+        assert!(err.contains("--ingress-lb-key"), "got: {err}");
+    }
+
+    #[test]
+    fn ingress_lb_key_without_lb_assertion_binding_errors() {
+        // A dangling `--ingress-lb-key` (without selecting the binding) would
+        // silently do nothing — an illusion of request-bound ingress. Reject it.
+        let mut a = minimal();
+        a.splice(0..0, args(&["--ingress-lb-key", &format!("lb-1:{}", lb_pub_b64())]));
+        let err = parse_args(&a).unwrap_err();
+        assert!(err.contains("has no effect"), "got: {err}");
+    }
+
+    #[test]
+    fn ingress_lb_key_malformed_value_errors() {
+        // Missing the `:` separator.
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--transport-binding", "lb-assertion",
+                "--ingress-lb-key", "no-colon-here",
+            ]),
+        );
+        assert!(parse_args(&a).unwrap_err().contains("keyid"));
+    }
+
+    #[test]
+    fn ingress_lb_key_invalid_public_key_errors() {
+        // A syntactically-correct `<id>:<body>` whose body is NOT a valid Ed25519
+        // public key fails closed at parse time.
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--transport-binding", "lb-assertion",
+                "--ingress-lb-key", "lb-1:not-a-real-key",
+            ]),
+        );
+        assert!(parse_args(&a).unwrap_err().contains("Ed25519 public key"));
+    }
+
+    #[test]
+    fn duplicate_ingress_lb_key_id_errors() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--transport-binding", "lb-assertion",
+                "--ingress-lb-key", &format!("lb-1:{}", lb_pub_b64()),
+                "--ingress-lb-key", &format!("lb-1:{}", lb_pub_b64()),
+            ]),
+        );
+        assert!(parse_args(&a).unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn strict_rejects_lb_assertion_binding() {
+        // Tier 3 places the LB in the TCB (request-bound INGRESS assertion, NOT
+        // end-to-end mTLS); strict/production refuses to enable it silently.
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--strict",
+                "--transport-binding", "lb-assertion",
+                "--ingress-lb-key", &format!("lb-1:{}", lb_pub_b64()),
+            ]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(
+            err.contains("lb-assertion") && err.contains("end-to-end"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn non_strict_lb_assertion_binding_is_ok() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--transport-binding", "lb-assertion",
+                "--ingress-lb-key", &format!("lb-1:{}", lb_pub_b64()),
+            ]),
+        );
+        let config = parse_args(&a).expect("non-strict lb-assertion parses");
+        assert_eq!(config.binding, BindingKind::LbAssertion);
     }
 
     #[test]

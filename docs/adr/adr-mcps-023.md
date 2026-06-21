@@ -105,14 +105,65 @@ and well-formed, and the transport-binding policy against the asserted identity.
 Audit MUST record the certificate enforcement point as the ingress in Tier 2.
 This shift MUST be stated in `security-boundary.md`.
 
-### Not in v0.3 — future Tier 3 boundary
+### Tier 3 — LB-signed, request-bound ingress assertion (resolved, issue #71)
 
 An LB-signed, request-bound assertion (the LB signing a statement tying client
-identity to the specific request hash) is tracked as a future **Tier 3**. Tier 3
-is required if a deployment wants the node to **cryptographically verify that the
-ingress assertion was bound to a specific MCP-S request**, rather than relying
-only on the authenticated LB↔node channel. v0.3 accepts authenticated LB↔node
-mTLS plus strict header handling inside one trust domain.
+identity to the specific request hash) is **Tier 3**. Tier 3 is required if a
+deployment wants the node to **cryptographically verify that the ingress
+assertion was bound to a specific MCP-S request**, rather than relying only on
+the authenticated LB↔node channel. v0.3's `trusted_ingress_asserted` (Tier 2)
+accepts authenticated LB↔node mTLS plus strict header handling inside one trust
+domain; Tier 3 adds the cryptographic request-binding on top.
+
+Tier 3 is implemented in `mcps-proxy` (issue #71, v0.4 axis-hardening) as the
+`LbAssertionBinding` node-side verifier and the `--transport-binding lb-assertion`
+/ repeatable `--ingress-lb-key <keyid>:<base64url-ed25519-pub>` configuration:
+
+- **Assertion format.** Fields: `key_id`, `asserted_client_identity`,
+  `request_hash` (the MCP-S `sha256:<base64url>` identifier), and a freshness
+  `validation_time` (Unix seconds). The **signed preimage** is a deterministic,
+  UNAMBIGUOUS **length-prefixed** encoding — a frozen domain-separation tag
+  (`mcps/lb-ingress-assertion/v1`) followed, for each variable-length field, by
+  its `u64` big-endian byte length then its bytes, then the fixed-width `i64`
+  timestamp. Length-prefixing (not delimiter-joining) defeats the
+  delimiter-collision class: no field value can be re-split into a different field
+  tuple. The LB Ed25519-signs that preimage. The wire form is a single header of
+  five `.`-separated base64url fields (the textual fields base64url-encoded so
+  they can never contain the `.` separator); the base64url framing is transport
+  only — the *signature* covers the length-prefixed preimage.
+- **LB key custody.** A small in-proxy trust map of LB verification keys addressed
+  by key id (`--ingress-lb-key`). An assertion naming an unknown key id is
+  rejected (fail closed).
+- **Node-side verification (ordered, fail-closed).** (1) parse/shape; (2) look up
+  the LB key by key id — unknown ⇒ reject; (3) Ed25519-verify the signature over
+  the canonical preimage — bad ⇒ reject; (4) compare the assertion's bound
+  `request_hash` to the **in-hand** request hash the node already holds (the same
+  `request_hash` from `verify_request`) — mismatch (cross-request / wrong hash) ⇒
+  reject; (5) freshness window — stale (or implausibly future) ⇒ reject. Only then
+  is the verified identity yielded, and it binds to the request signer through the
+  SAME `TransportBindingPolicy` (`ExactMatchBinding`) the Tier-1/Tier-2 paths use.
+- **Replay.** A replayed assertion against a *different* request fails check (4)
+  (its bound hash will not match); a replay against the *same* request is caught by
+  that request's own replay cache (run in `verify_request` before binding) and by
+  the freshness window. The assertion therefore needs no independent nonce.
+- **Honesty.** Tier 3 verifies request-bound INGRESS assertion — the LB still
+  terminates the client mTLS and is in the TCB — so it is **NOT** end-to-end
+  client↔node binding and MUST NOT be surfaced as `end_to_end_mtls`. The guarantee
+  string is `request_bound_ingress_assertion`. Object-signature verification is
+  unchanged and still runs in `verify_request` independently of and before this
+  transport binding. Under `--strict`/`--production` the proxy refuses to enable
+  `lb-assertion` silently.
+
+**Integration scope note (issue #71).** The cryptographic verifier, the LB
+key-custody trust map, and the CLI configuration land in `mcps-proxy`. Activating
+Tier 3 in the live serve loop additionally requires routing the presented
+assertion header and the verified in-hand `request_hash` into the binding step;
+that step depends on the post-verification request hash, whereas the existing
+`IdentityStrategy` seam resolves identity *pre*-verification and the shared
+`serve_once`/`serve` callback (used by out-of-scope demo tests) passes only the
+request body. Wiring it end-to-end through that callback is tracked as a
+follow-up; the verifier here is the load-bearing security unit and is fully
+conformance-tested in-crate.
 
 ## Threat Model
 
@@ -211,4 +262,6 @@ client-identity headers and trust-by-network-location are forbidden."*
   LB↔node mTLS vs. a structured metadata block).
 - Whether the migration to Tier 2 needs its own strict-mode guard so it cannot be
   enabled silently in a hardened deployment.
-- Future Tier 3 (LB-signed request-bound assertion) — its own ADR when scoped.
+- ~~Future Tier 3 (LB-signed request-bound assertion) — its own ADR when scoped.~~
+  RESOLVED (issue #71, v0.4): Tier 3 is specified and implemented in this ADR's
+  "Tier 3" section above (`LbAssertionBinding` + `--transport-binding lb-assertion`).
