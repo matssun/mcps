@@ -129,7 +129,7 @@ pub fn current_target_arch() -> Option<TargetArch> {
 /// syscalls themselves:
 ///   * `io_uring_setup` — create the ring (no ring ⇒ no SQEs can be submitted),
 ///   * `io_uring_enter` — submit/await SQEs (the actual op-dispatch entry point),
-///   * `io_uring_register` — register fds/buffers (denied for defence in depth;
+///   * `io_uring_register` — register fds/buffers (denied for defense in depth;
 ///     useless without `setup`, but kept symmetric so the posture is unambiguous).
 /// Denying `io_uring_setup` alone already prevents creating a ring, but we deny
 /// all three so the DenyAll posture reads as a complete closure of the io_uring
