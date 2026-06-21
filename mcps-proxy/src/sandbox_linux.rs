@@ -120,6 +120,28 @@ pub fn current_target_arch() -> Option<TargetArch> {
 ///   * `socketcall` — the multiplexed 32-bit socket entry point (x86 only; absent
 ///     on x86_64 / aarch64, so it is included only where libc defines it).
 ///
+/// It ALSO blocks the io_uring submission path, because io_uring is a *second*
+/// way to reach the network stack that does not go through the `socket`/`connect`
+/// syscalls a classic seccomp deny-list watches. A program can `io_uring_setup` a
+/// ring and then submit `IORING_OP_SOCKET` / `IORING_OP_CONNECT` (and
+/// send/recv) SQEs that the kernel executes asynchronously — entirely bypassing a
+/// filter that only denies `socket`/`connect`. So we deny the io_uring control
+/// syscalls themselves:
+///   * `io_uring_setup` — create the ring (no ring ⇒ no SQEs can be submitted),
+///   * `io_uring_enter` — submit/await SQEs (the actual op-dispatch entry point),
+///   * `io_uring_register` — register fds/buffers (denied for defense in depth;
+///     useless without `setup`, but kept symmetric so the posture is unambiguous).
+/// Denying `io_uring_setup` alone already prevents creating a ring, but we deny
+/// all three so the DenyAll posture reads as a complete closure of the io_uring
+/// egress avenue rather than relying on one chokepoint.
+///
+/// NOTE on completeness: this is a seccomp *deny-list*, not a full allowlist. It
+/// closes the socket-syscall and io_uring egress avenues; a hardened DenyAll
+/// deployment SHOULD additionally disable io_uring at the kernel level
+/// (`sysctl kernel.io_uring_disabled=2`) so the ring cannot be created even if a
+/// future syscall surface is missed here. The Landlock fs allowlist remains the
+/// orthogonal containment for everything else.
+///
 /// We do NOT deny `bind`/`listen`/`accept` (inbound) or `sendto`/`recvfrom`: the
 /// policy is specifically about EGRESS, and denying `socket` already prevents
 /// creating the fd those would operate on. Returned numbers are the libc `SYS_*`
@@ -129,6 +151,15 @@ pub fn denied_egress_syscalls() -> Vec<i64> {
     let mut denied: Vec<i64> = Vec::new();
     denied.push(libc::SYS_socket);
     denied.push(libc::SYS_connect);
+    // io_uring egress closure: deny the ring control syscalls so the inner server
+    // cannot submit IORING_OP_SOCKET/IORING_OP_CONNECT SQEs that would otherwise
+    // reach the network stack without ever invoking socket()/connect(). These
+    // SYS_* constants are defined by libc on every seccompiler-supported target
+    // (x86_64, aarch64), which are the only arches `current_target_arch()` accepts;
+    // on any other arch the egress build already fails closed before we get here.
+    denied.push(libc::SYS_io_uring_setup);
+    denied.push(libc::SYS_io_uring_enter);
+    denied.push(libc::SYS_io_uring_register);
     // `socketcall` is the 32-bit multiplexed socket syscall; it only exists on
     // architectures that define it (e.g. x86). libc exposes it per-target, so this
     // arm compiles in only where the constant is present.
@@ -279,6 +310,18 @@ impl SandboxArtifacts {
     /// and `seccomp` syscalls on already-allocated, already-built state moved into
     /// the closure. It opens no paths, builds no ruleset, and compiles no filter —
     /// all of that happened in the parent in [`build_sandbox`].
+    ///
+    /// CAVEAT — one residual non-async-signal-safe step: `self.ruleset.try_clone()`
+    /// (step 2 below) `dup`s the ruleset fd and, depending on the `landlock` crate
+    /// version, MAY allocate for its wrapper. That is the SINGLE heap-touch in this
+    /// otherwise allocation-free path, so the "issues only syscalls on prebuilt
+    /// state" claim is not absolute. It is acceptable because: (a) the parent is
+    /// effectively single-threaded at the spawn point (no concurrent allocator
+    /// activity to deadlock against in the forked child), and (b) any failure of
+    /// the clone surfaces fail-closed as an `io::Error` that aborts the spawn — the
+    /// inner server is never `exec`'d with weakened or absent containment. The clone
+    /// is required because `restrict_self` consumes the ruleset and the `pre_exec`
+    /// closure is `FnMut` (may be retained), so we cannot move the ruleset out.
     pub fn enforce(&mut self) -> std::io::Result<()> {
         // (1) no_new_privs first (explicit; required for SECCOMP_SET_MODE_FILTER
         //     without CAP_SYS_ADMIN). SAFETY: a single prctl with constant args.
@@ -369,6 +412,27 @@ mod tests {
         assert!(
             denied.contains(&libc::SYS_connect),
             "DenyAll must deny connect() to stop outbound connections"
+        );
+    }
+
+    #[test]
+    fn denied_egress_set_includes_io_uring_egress_path() {
+        // io_uring is a second route to the network stack (IORING_OP_SOCKET /
+        // IORING_OP_CONNECT submitted via the ring) that bypasses a socket()/
+        // connect() deny-list. The DenyAll posture must close the ring control
+        // syscalls so that route is unavailable.
+        let denied = denied_egress_syscalls();
+        assert!(
+            denied.contains(&libc::SYS_io_uring_setup),
+            "DenyAll must deny io_uring_setup() to stop ring-based egress"
+        );
+        assert!(
+            denied.contains(&libc::SYS_io_uring_enter),
+            "DenyAll must deny io_uring_enter() to stop ring SQE submission/egress"
+        );
+        assert!(
+            denied.contains(&libc::SYS_io_uring_register),
+            "DenyAll must deny io_uring_register() for a complete io_uring closure"
         );
     }
 
