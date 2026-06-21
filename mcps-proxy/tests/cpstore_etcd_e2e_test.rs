@@ -17,6 +17,8 @@
 //! now=0 absolute-epoch TTL).
 #![cfg(feature = "cpstore_etcd")]
 
+use std::io::Read;
+
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde_json::json;
@@ -242,6 +244,21 @@ fn post_json(base_url: &str, path: &str, body: &Value) -> Value {
         .set("Content-Type", "application/json")
         .send_bytes(&bytes)
         .unwrap_or_else(|e| panic!("etcd POST {path}: {e}"));
-    let text = resp.into_string().expect("read etcd response");
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("etcd {path} reply not JSON: {e}"))
+    // Bounded read, mirroring the production bounded-read idiom in
+    // `aws_kms_keysource.rs` / `etcd_store.rs`: a misconfigured/hostile
+    // `MCPS_TEST_ETCD_URL` could otherwise stream an arbitrarily large body and OOM
+    // the test runner. lease/grant and txn replies are tiny — cap at 256 KiB (cap+1
+    // so a body whose length is EXACTLY the cap is accepted; only a strictly larger
+    // body is rejected). Behavior is otherwise identical to the prior
+    // `into_string()` read.
+    const MAX_TEST_RESPONSE_BYTES: u64 = 256 * 1024;
+    let mut buf = Vec::new();
+    resp.into_reader()
+        .take(MAX_TEST_RESPONSE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .unwrap_or_else(|e| panic!("etcd {path} read response: {e}"));
+    if buf.len() as u64 > MAX_TEST_RESPONSE_BYTES {
+        panic!("etcd {path} response body exceeds {MAX_TEST_RESPONSE_BYTES}-byte cap");
+    }
+    serde_json::from_slice(&buf).unwrap_or_else(|e| panic!("etcd {path} reply not JSON: {e}"))
 }

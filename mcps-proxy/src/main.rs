@@ -317,7 +317,7 @@ fn run() -> Result<(), String> {
                 "none"
             };
             eprintln!(
-                "mcps-proxy: replay cache = shared (CP/linearizable; etcd backend, issue #69)"
+                "mcps-proxy: replay cache = shared (CP/linearizable; {backend} backend, issue #69)"
             );
             eprintln!("mcps-proxy: {}", tier.startup_audit_line(backend));
             cli::build_cpstore_replay_cache(

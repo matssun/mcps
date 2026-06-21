@@ -166,60 +166,30 @@ pub(crate) fn decision_from_txn(resp: &Value) -> ReplayDecision {
     }
 }
 
-/// A SHARED, CP / LINEARIZABLE [`AtomicReplayStore`] backed by etcd v3 over its
-/// JSON/HTTP gateway (#69).
-///
-/// Holds a blocking `ureq` agent, the gateway base URL, the store's own clock
-/// (read per op to derive the lease TTL — the pure `ReplayCache` trait passes
-/// `now_unix = 0`), and a bounded per-request timeout. Any transport / HTTP-status
-/// / JSON-parse failure surfaces as [`ReplayStoreError::Unavailable`] (fail closed
-/// — an outage is NEVER silently treated as a fresh nonce, and the proxy never
-/// serves through).
-pub struct EtcdAtomicReplayStore {
+/// The HTTP seam between [`EtcdAtomicReplayStore`]'s decision logic and the etcd v3
+/// JSON gateway: a single blocking `POST <base>/<path>` that returns the parsed JSON
+/// reply or [`ReplayStoreError::Unavailable`] (fail closed). Production is
+/// [`UreqEtcdTransport`] (blocking `ureq`); deterministic unit tests inject a
+/// scripted double so the lease-grant / txn / lease-revoke call sequence is asserted
+/// WITHOUT a live etcd. A trait, not a free function, ONLY to make that seam
+/// testable — it adds no async and no new dependency (ADR-MCPS-018 sync firewall).
+pub(crate) trait EtcdTransport: Send + Sync {
+    fn post(&self, path: &str, body: &Value) -> Result<Value, ReplayStoreError>;
+}
+
+/// The production [`EtcdTransport`]: a blocking `ureq` agent over etcd's v3 JSON
+/// gateway with a bounded per-request timeout.
+struct UreqEtcdTransport {
     agent: ureq::Agent,
     /// The etcd v3 gateway base URL, e.g. `http://127.0.0.1:2379`, with any
     /// trailing slash trimmed so endpoint paths join cleanly.
     base_url: String,
-    /// The store's OWN clock (the proxy's impure edge). Read per op to derive the
-    /// lease TTL window, since the pure `ReplayCache` trait passes `now_unix = 0`.
-    clock: UnixClock,
     /// Bounds EACH blocking HTTP op so a stalled etcd fails closed within the
     /// bound instead of wedging the single-threaded serve loop.
     timeout: Duration,
 }
 
-impl EtcdAtomicReplayStore {
-    /// Connect to the etcd v3 JSON gateway at `endpoint` (e.g.
-    /// `http://127.0.0.1:2379`) with the bounded default timeout and the
-    /// production system clock. Convenience over [`connect_with`](Self::connect_with);
-    /// prefer that from the CLI so the configured socket timeouts bound the op.
-    pub fn connect(endpoint: &str) -> Self {
-        Self::connect_with(endpoint, DEFAULT_ETCD_TIMEOUT, system_clock())
-    }
-
-    /// Connect with an explicit bounded per-request `timeout` and injected
-    /// `clock`. No network I/O happens here (etcd's gateway is stateless HTTP and
-    /// `ureq` opens connections lazily per request); construction cannot fail. The
-    /// FIRST `insert_if_absent` is what surfaces an unreachable endpoint as
-    /// [`ReplayStoreError::Unavailable`] (fail closed) at runtime.
-    pub fn connect_with(endpoint: &str, timeout: Duration, clock: UnixClock) -> Self {
-        EtcdAtomicReplayStore {
-            agent: ureq::AgentBuilder::new().build(),
-            base_url: endpoint.trim_end_matches('/').to_string(),
-            clock,
-            timeout,
-        }
-    }
-
-    /// The exact lease TTL (seconds) `insert_if_absent` will request for
-    /// `expires_at_unix`, reading the store's OWN injected clock (NOT the trait's
-    /// `now_unix = 0`). Factored out so the MCPS-090 clock WIRING — that the store
-    /// derives the TTL from a real `now`, not 0 — is unit-testable deterministically
-    /// (see `ttl_secs_via_clock`) with a fixed clock and no etcd.
-    fn ttl_secs_for(&self, expires_at_unix: i64) -> i64 {
-        ttl_secs_via_clock(&self.clock, expires_at_unix)
-    }
-
+impl EtcdTransport for UreqEtcdTransport {
     /// POST `body` to `<base>/<path>` and return the parsed JSON response, or
     /// [`ReplayStoreError::Unavailable`] on any transport / non-2xx status /
     /// JSON-parse failure (fail closed). The bounded `timeout` is applied to the
@@ -259,6 +229,74 @@ impl EtcdAtomicReplayStore {
     }
 }
 
+/// A SHARED, CP / LINEARIZABLE [`AtomicReplayStore`] backed by etcd v3 over its
+/// JSON/HTTP gateway (#69).
+///
+/// Holds an [`EtcdTransport`] (production: a blocking `ureq` agent over the gateway
+/// base URL with a bounded per-request timeout) and the store's own clock (read per
+/// op to derive the lease TTL — the pure `ReplayCache` trait passes `now_unix = 0`).
+/// Any transport / HTTP-status / JSON-parse failure surfaces as
+/// [`ReplayStoreError::Unavailable`] (fail closed — an outage is NEVER silently
+/// treated as a fresh nonce, and the proxy never serves through).
+pub struct EtcdAtomicReplayStore {
+    /// The HTTP seam to etcd's JSON gateway (production `ureq`; scripted in tests).
+    transport: Box<dyn EtcdTransport>,
+    /// The store's OWN clock (the proxy's impure edge). Read per op to derive the
+    /// lease TTL window, since the pure `ReplayCache` trait passes `now_unix = 0`.
+    clock: UnixClock,
+}
+
+impl EtcdAtomicReplayStore {
+    /// Connect to the etcd v3 JSON gateway at `endpoint` (e.g.
+    /// `http://127.0.0.1:2379`) with the bounded default timeout and the
+    /// production system clock. Convenience over [`connect_with`](Self::connect_with);
+    /// prefer that from the CLI so the configured socket timeouts bound the op.
+    pub fn connect(endpoint: &str) -> Self {
+        Self::connect_with(endpoint, DEFAULT_ETCD_TIMEOUT, system_clock())
+    }
+
+    /// Connect with an explicit bounded per-request `timeout` and injected
+    /// `clock`. No network I/O happens here (etcd's gateway is stateless HTTP and
+    /// `ureq` opens connections lazily per request); construction cannot fail. The
+    /// FIRST `insert_if_absent` is what surfaces an unreachable endpoint as
+    /// [`ReplayStoreError::Unavailable`] (fail closed) at runtime.
+    pub fn connect_with(endpoint: &str, timeout: Duration, clock: UnixClock) -> Self {
+        EtcdAtomicReplayStore {
+            transport: Box::new(UreqEtcdTransport {
+                agent: ureq::AgentBuilder::new().build(),
+                base_url: endpoint.trim_end_matches('/').to_string(),
+                timeout,
+            }),
+            clock,
+        }
+    }
+
+    /// Construct over an injected [`EtcdTransport`] — the deterministic unit-test
+    /// seam that drives the REAL `insert_if_absent` decision + lease-revoke logic
+    /// against a scripted transport double, no live etcd. Production uses
+    /// [`connect_with`](Self::connect_with).
+    #[cfg(test)]
+    pub(crate) fn with_transport(transport: Box<dyn EtcdTransport>, clock: UnixClock) -> Self {
+        EtcdAtomicReplayStore { transport, clock }
+    }
+
+    /// The exact lease TTL (seconds) `insert_if_absent` will request for
+    /// `expires_at_unix`, reading the store's OWN injected clock (NOT the trait's
+    /// `now_unix = 0`). Factored out so the MCPS-090 clock WIRING — that the store
+    /// derives the TTL from a real `now`, not 0 — is unit-testable deterministically
+    /// (see `ttl_secs_via_clock`) with a fixed clock and no etcd.
+    fn ttl_secs_for(&self, expires_at_unix: i64) -> i64 {
+        ttl_secs_via_clock(&self.clock, expires_at_unix)
+    }
+}
+
+/// The etcd `lease/revoke` request body for `POST /v3/lease/revoke`: the lease id as
+/// a STRING (the v3 JSON gateway encodes 64-bit ints as strings). Pure, so the wire
+/// shape is unit-testable without a live etcd.
+pub(crate) fn build_lease_revoke_body(lease_id: i64) -> Value {
+    json!({ "ID": lease_id.to_string() })
+}
+
 /// Upper bound on an etcd response body read (lease/grant and txn replies are
 /// tiny); caps a hostile/misconfigured endpoint's body rather than reading
 /// unbounded.
@@ -292,7 +330,9 @@ impl AtomicReplayStore for EtcdAtomicReplayStore {
 
         // 1) Grant a lease bounded by that TTL, so the nonce self-evicts after its
         //    freshness window (no client-side prune).
-        let lease_resp = self.post("v3/lease/grant", &build_lease_grant_body(ttl_secs))?;
+        let lease_resp = self
+            .transport
+            .post("v3/lease/grant", &build_lease_grant_body(ttl_secs))?;
         let lease_id = parse_lease_id(&lease_resp)?;
 
         // etcd v3 JSON encodes keys/values as STANDARD base64. Value is a constant
@@ -303,22 +343,44 @@ impl AtomicReplayStore for EtcdAtomicReplayStore {
         // 2) Linearizable put-if-absent: a txn whose compare holds IFF the key has
         //    create_revision 0 (i.e. never existed). `succeeded` ⇒ Fresh, else the
         //    key already existed ⇒ Replay.
-        let txn_resp = self.post("v3/kv/txn", &build_txn_body(&key_b64, &value_b64, lease_id))?;
-        Ok(decision_from_txn(&txn_resp))
+        let txn_resp = self
+            .transport
+            .post("v3/kv/txn", &build_txn_body(&key_b64, &value_b64, lease_id))?;
+        let decision = decision_from_txn(&txn_resp);
+
+        // On the Replay branch the txn did NOT put anything, so the lease granted in
+        // step 1 is attached to nothing and would sit idle until its TTL expires.
+        // Under a replay storm that orphan-lease churn is avoidable etcd load, so
+        // issue a BEST-EFFORT revoke to release it now. This is pure cleanup: it does
+        // NOT change the decision (still `Replay`), and a revoke transport/HTTP
+        // failure is intentionally swallowed — at worst the lease falls back to
+        // expiring at its TTL (the prior behavior). Cleanup is fail-SAFE, never
+        // fail-closed: a revoke error must never turn a Replay into a Fresh or an
+        // error. The happy (Fresh) path keeps its lease and issues NO extra call.
+        if matches!(decision, ReplayDecision::Replay) {
+            let _ = self
+                .transport
+                .post("v3/lease/revoke", &build_lease_revoke_body(lease_id));
+        }
+
+        Ok(decision)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::build_lease_grant_body;
+    use super::build_lease_revoke_body;
     use super::build_txn_body;
     use super::compute_ttl_secs;
     use super::decision_from_txn;
     use super::parse_lease_id;
     use super::ttl_secs_via_clock;
+    use super::EtcdTransport;
     use super::ReplayDecision;
     use super::ReplayStoreError;
     use super::UnixClock;
+    use super::Value;
     use serde_json::json;
 
     /// PURE, no-etcd proof that the MCPS-090 `now = 0` bug is gone: with a real
@@ -447,6 +509,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use super::AtomicReplayStore;
+    use super::EtcdAtomicReplayStore;
     use crate::shared_replay::SharedReplayCache;
     use mcps_core::ReplayCache;
     use mcps_core::ReplayCacheError;
@@ -455,6 +518,176 @@ mod tests {
     use std::sync::Mutex;
 
     const AUD: &str = "did:example:verifier";
+
+    /// The `lease/revoke` body carries the lease id as a STRING (the v3 JSON gateway
+    /// encodes 64-bit ints as strings), matching how the txn body passes the lease.
+    #[test]
+    fn lease_revoke_body_carries_string_lease_id() {
+        let body = build_lease_revoke_body(7587880697336124931);
+        assert_eq!(
+            body["ID"],
+            json!("7587880697336124931"),
+            "lease id must be a string for the v3 JSON gateway 64-bit encoding"
+        );
+    }
+
+    /// A scripted [`EtcdTransport`] double: it returns a fixed reply per etcd path
+    /// (`v3/lease/grant`, `v3/kv/txn`, `v3/lease/revoke`) and RECORDS every
+    /// `(path, body)` it was POSTed, so a test can assert the exact call sequence the
+    /// REAL `insert_if_absent` drives — no live etcd. `revoke_fails` flips the
+    /// revoke reply to a transport failure to prove the best-effort (fail-safe)
+    /// guarantee. Mirrors the model-store test-double style above.
+    struct ScriptedTransport {
+        /// Mapping from etcd path to the JSON reply to return for a successful POST.
+        replies: std::collections::HashMap<String, Value>,
+        /// When true, `v3/lease/revoke` returns `Unavailable` instead of a reply,
+        /// modelling a revoke transport/HTTP failure.
+        revoke_fails: bool,
+        /// The recorded `(path, body)` of every POST, in call order.
+        calls: Mutex<Vec<(String, Value)>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(txn_reply: Value, revoke_fails: bool) -> Self {
+            let mut replies = std::collections::HashMap::new();
+            // A lease-grant reply carrying a non-zero id (the JSON gateway's string
+            // encoding) so `parse_lease_id` succeeds and the flow reaches the txn.
+            replies.insert("v3/lease/grant".to_string(), json!({ "ID": "424242", "TTL": "600" }));
+            replies.insert("v3/kv/txn".to_string(), txn_reply);
+            replies.insert("v3/lease/revoke".to_string(), json!({ "header": { "revision": "9" } }));
+            ScriptedTransport {
+                replies,
+                revoke_fails,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn paths(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .iter()
+                .map(|(p, _)| p.clone())
+                .collect()
+        }
+    }
+
+    impl EtcdTransport for ScriptedTransport {
+        fn post(&self, path: &str, body: &Value) -> Result<Value, ReplayStoreError> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push((path.to_string(), body.clone()));
+            if self.revoke_fails && path == "v3/lease/revoke" {
+                return Err(ReplayStoreError::Unavailable {
+                    details: "scripted revoke failure".to_string(),
+                });
+            }
+            Ok(self
+                .replies
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| panic!("scripted transport has no reply for path {path}")))
+        }
+    }
+
+    /// Delegating impl so a test can hold an `Arc<ScriptedTransport>` (to inspect the
+    /// recorded calls AFTER the store consumed its `Box<dyn EtcdTransport>`) while the
+    /// store drives the SAME shared double.
+    impl EtcdTransport for Arc<ScriptedTransport> {
+        fn post(&self, path: &str, body: &Value) -> Result<Value, ReplayStoreError> {
+            (**self).post(path, body)
+        }
+    }
+
+    fn fixed_clock() -> UnixClock {
+        Box::new(|| 1_779_998_100)
+    }
+
+    /// A Replay outcome (txn `succeeded: false`) triggers a best-effort
+    /// `v3/lease/revoke` for the just-granted lease id — releasing the orphan lease
+    /// the put-if-absent never attached, rather than letting it churn until TTL.
+    /// The decision is unchanged (still `Replay`); the revoke is a side cleanup.
+    #[test]
+    fn replay_revokes_the_unused_lease() {
+        let transport = Arc::new(ScriptedTransport::new(json!({ "succeeded": false }), false));
+        let store = EtcdAtomicReplayStore::with_transport(
+            Box::new(Arc::clone(&transport)),
+            fixed_clock(),
+        );
+        let decision = store
+            .insert_if_absent("did:example:host|aud|nonce", 1_779_998_700, 0)
+            .expect("replay decision must not error");
+        assert_eq!(decision, ReplayDecision::Replay, "key present ⇒ Replay");
+        assert_eq!(
+            transport.paths(),
+            vec![
+                "v3/lease/grant".to_string(),
+                "v3/kv/txn".to_string(),
+                "v3/lease/revoke".to_string(),
+            ],
+            "a Replay must follow grant+txn with a lease/revoke of the granted lease"
+        );
+        // The revoke targets the EXACT lease id the grant returned (424242), as a
+        // string per the JSON gateway encoding.
+        let revoke_body = transport
+            .calls
+            .lock()
+            .expect("calls lock")
+            .iter()
+            .find(|(p, _)| p == "v3/lease/revoke")
+            .map(|(_, b)| b.clone())
+            .expect("a revoke call must have been recorded");
+        assert_eq!(
+            revoke_body["ID"],
+            json!("424242"),
+            "revoke must target the just-granted lease id"
+        );
+    }
+
+    /// The Fresh (happy) path keeps its lease: grant + txn only, NO extra
+    /// `lease/revoke` call — the put attached the lease, so there is nothing to
+    /// release.
+    #[test]
+    fn fresh_does_not_revoke_the_lease() {
+        let transport = Arc::new(ScriptedTransport::new(json!({ "succeeded": true }), false));
+        let store = EtcdAtomicReplayStore::with_transport(
+            Box::new(Arc::clone(&transport)),
+            fixed_clock(),
+        );
+        let decision = store
+            .insert_if_absent("did:example:host|aud|nonce", 1_779_998_700, 0)
+            .expect("fresh decision must not error");
+        assert_eq!(decision, ReplayDecision::Fresh, "key absent ⇒ Fresh");
+        assert_eq!(
+            transport.paths(),
+            vec!["v3/lease/grant".to_string(), "v3/kv/txn".to_string()],
+            "the Fresh path must NOT issue a lease/revoke — the lease is in use"
+        );
+    }
+
+    /// The revoke is BEST-EFFORT / fail-SAFE: a revoke transport failure must NOT
+    /// turn a Replay into an error or a Fresh — the decision stays `Replay` and the
+    /// lease simply falls back to expiring at its TTL (the prior behavior).
+    #[test]
+    fn replay_revoke_failure_still_returns_replay_never_errors() {
+        let transport = Arc::new(ScriptedTransport::new(json!({ "succeeded": false }), true));
+        let store = EtcdAtomicReplayStore::with_transport(
+            Box::new(Arc::clone(&transport)),
+            fixed_clock(),
+        );
+        let result = store.insert_if_absent("did:example:host|aud|nonce", 1_779_998_700, 0);
+        assert_eq!(
+            result,
+            Ok(ReplayDecision::Replay),
+            "a revoke failure must NOT turn a Replay into an error or a Fresh"
+        );
+        // The revoke was still ATTEMPTED (best-effort), even though it failed.
+        assert!(
+            transport.paths().contains(&"v3/lease/revoke".to_string()),
+            "the revoke must be attempted on Replay even when it then fails"
+        );
+    }
     const NONCE: &str = "nonce-69-cpstore-acceptance";
     const EXPIRES: i64 = 1_779_998_700;
     const SKEW: i64 = 30;
