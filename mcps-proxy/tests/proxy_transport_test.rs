@@ -102,7 +102,7 @@ fn signer_bound_to_matching_identity_is_allowed() {
     let (proxy, calls) = proxy(true);
     let req = signed_request("nonce-bind-ok-1");
     let id = identity(SIGNER);
-    let response = proxy.handle_with_transport(&req, now(), Some(&id));
+    let response = proxy.handle_with_transport(&req, now(), Some(&id), None);
     assert_eq!(calls.borrow().len(), 1, "bound request reaches the inner");
     let value: Value = serde_json::from_slice(&response).unwrap();
     assert!(value.get("error").is_none(), "no error for a bound request");
@@ -113,7 +113,7 @@ fn mismatched_identity_is_denied_before_dispatch() {
     let (proxy, calls) = proxy(true);
     let req = signed_request("nonce-bind-mm-1");
     let id = identity("did:example:someone-else");
-    let response = proxy.handle_with_transport(&req, now(), Some(&id));
+    let response = proxy.handle_with_transport(&req, now(), Some(&id), None);
     assert_eq!(calls.borrow().len(), 0, "mismatch must not reach the inner");
     assert_eq!(error_message(&response), "mcps.transport_binding_failed");
 }
@@ -122,7 +122,7 @@ fn mismatched_identity_is_denied_before_dispatch() {
 fn absent_identity_is_denied_when_binding_required() {
     let (proxy, calls) = proxy(true);
     let req = signed_request("nonce-bind-none1");
-    let response = proxy.handle_with_transport(&req, now(), None);
+    let response = proxy.handle_with_transport(&req, now(), None, None);
     assert_eq!(calls.borrow().len(), 0, "absent identity must not reach the inner");
     assert_eq!(error_message(&response), "mcps.transport_binding_failed");
 }
@@ -133,7 +133,7 @@ fn without_binding_the_transport_identity_is_ignored() {
     let req = signed_request("nonce-bind-off1");
     // Even a clearly-wrong identity is ignored when no binding is configured.
     let id = identity("did:example:irrelevant");
-    let response = proxy.handle_with_transport(&req, now(), Some(&id));
+    let response = proxy.handle_with_transport(&req, now(), Some(&id), None);
     assert_eq!(calls.borrow().len(), 1, "no binding → request is forwarded");
     let value: Value = serde_json::from_slice(&response).unwrap();
     assert!(value.get("error").is_none());
@@ -154,7 +154,7 @@ fn valid_identity_does_not_rescue_a_tampered_signature() {
 
     // The transport identity MATCHES the signer (binding would pass on its own).
     let id = identity(SIGNER);
-    let response = proxy.handle_with_transport(&tampered, now(), Some(&id));
+    let response = proxy.handle_with_transport(&tampered, now(), Some(&id), None);
 
     assert_eq!(calls.borrow().len(), 0, "a tampered request must never reach the inner");
     assert_eq!(error_message(&response), "mcps.invalid_signature");

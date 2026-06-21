@@ -407,6 +407,26 @@ nt_rust_test(
     ],
 )
 
+# Issue #71 (ADR-MCPS-023 Tier 3): LB-signed, request-bound ingress assertion wired
+# into the proxy serving path. Serve-level acceptance over the SAME
+# Proxy::handle_with_transport entry point the production loop calls — a valid
+# request-bound assertion reaches the inner; a cross-request / tampered / unknown-key
+# / stale / missing-header assertion is rejected BEFORE dispatch; and a tampered
+# object signature still fails first (object verify before transport binding).
+nt_rust_test(
+    name = "proxy_lb_assertion_test",
+    srcs = ["tests/proxy_lb_assertion_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_proxy",
+        "//mcps-core:mcps_core",
+        "//mcps-host:mcps_host",
+        "@crates_mcps//:serde_json",
+    ],
+)
+
 # ADR-MCPS-022: per-node key custody — authorized key-set admission verified
 # through Core verify_response (per-node accept, unknown/revoked reject, shared
 # mode, algorithm boundary, 021+022 composition).

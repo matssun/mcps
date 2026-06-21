@@ -1508,6 +1508,42 @@ fn parse_cert_lifetime(value: &str) -> Result<Option<Duration>, String> {
     })
 }
 
+/// Build the configured ADR-MCPS-023 Tier-3 LB-signed, request-bound ingress
+/// assertion verifier (issue #71) from `config.ingress_lb_keys`, or `None` when the
+/// binding is not `lb-assertion`.
+///
+/// `parse_args` has ALREADY validated (fail closed) that, under `lb-assertion`,
+/// every `--ingress-lb-key` body is a base64url 32-byte Ed25519 public key and that
+/// at least one key is present with unique ids — so the per-key decode here cannot
+/// be reached with a malformed key in a well-formed config; it nonetheless surfaces
+/// a precise error rather than panicking if that invariant is ever violated. The
+/// yielded identity's [`IdentitySource`] mirrors the configured identity policy, so
+/// a Tier-3 identity reports the same source field the direct-TLS / reverse-proxy
+/// paths would.
+pub fn build_lb_assertion_binding(
+    config: &Config,
+) -> Result<Option<crate::transport::LbAssertionBinding>, String> {
+    if config.binding != BindingKind::LbAssertion {
+        return Ok(None);
+    }
+    let source = match config.identity_source {
+        IdentityPolicy::UriSan => crate::transport::IdentitySource::UriSan,
+        IdentityPolicy::DnsSan => crate::transport::IdentitySource::DnsSan,
+        IdentityPolicy::CnLegacy => crate::transport::IdentitySource::CommonName,
+    };
+    let mut binding = crate::transport::LbAssertionBinding::new(source);
+    for (key_id, key_b64) in &config.ingress_lb_keys {
+        let key = VerificationKey::from_b64url(key_b64).map_err(|_| {
+            format!(
+                "invalid --ingress-lb-key '{key_id}': the body must be a base64url-no-pad \
+                 32-byte Ed25519 public key"
+            )
+        })?;
+        binding.add_key(key_id.clone(), key);
+    }
+    Ok(Some(binding))
+}
+
 /// Build the configured [`KeySource`].
 ///
 /// MCPS-076 (audit gap G-3): [`KeySourceKind::Env`] is honored ONLY in a build with

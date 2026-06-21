@@ -188,6 +188,8 @@ pub use tls::extract_identity;
 pub use tls::IdentityStrategy;
 pub use tls::serve;
 pub use tls::serve_once;
+pub use tls::serve_once_with_assertion;
+pub use tls::MCP_INGRESS_ASSERTION_HEADER;
 pub use tls::RustlsDirectProvider;
 pub use tls::ServerLimits;
 pub use tls::ServerOptions;

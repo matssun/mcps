@@ -79,11 +79,20 @@ impl Default for ServerLimits {
     }
 }
 
+/// The trusted-ingress Tier-3 (ADR-MCPS-023, issue #71) assertion header. A single
+/// HTTP header carrying the LB-signed, request-bound ingress assertion (the
+/// `<key_id>.<identity>.<request_hash>.<validation_time>.<signature>` wire form).
+/// Lowercased for case-insensitive [`RequestHeaders`] lookup. The serve loop fails
+/// closed on a DUPLICATED header (via [`RequestHeaders::count`]) before the value
+/// is ever read — a duplicate signals a downstream injection attempt.
+pub const MCP_INGRESS_ASSERTION_HEADER: &str = "mcp-ingress-assertion";
+
 /// Where the served request's verified transport identity comes from. These are
 /// mutually exclusive: a connection is bound EITHER by a locally-terminated mTLS
 /// client certificate OR by a header set by a trusted upstream reverse proxy,
-/// never both. The CLI enforces the exclusivity; the serve loop honours the one
-/// chosen strategy and never mixes them on a single connection.
+/// OR by an LB-signed request-bound ingress assertion — never more than one. The
+/// CLI enforces the exclusivity; the serve loop honours the one chosen strategy
+/// and never mixes them on a single connection.
 #[derive(Debug, Clone)]
 pub enum IdentityStrategy {
     /// Direct mTLS: the identity is the configured field of the verified peer
@@ -96,6 +105,15 @@ pub enum IdentityStrategy {
     /// operator asserts the listening socket is reachable only by the trusted
     /// upstream (see [`ReverseProxyMtlsProvider`]).
     ReverseProxyHeader(ReverseProxyMtlsProvider),
+    /// ADR-MCPS-023 Tier 3 (issue #71): the verified transport identity comes from
+    /// an LB-signed, request-bound ingress assertion presented in the
+    /// [`MCP_INGRESS_ASSERTION_HEADER`]. The identity CANNOT be resolved at the
+    /// connection seam (the assertion binds the request hash, known only after
+    /// object verification), so under this strategy [`resolve_identity`] yields
+    /// `None` and the serve loop instead extracts the raw assertion header and
+    /// hands it to the post-verification check (`Proxy::with_lb_assertion`). The
+    /// local client certificate is NOT consulted for identity.
+    LbAssertion,
 }
 
 impl Default for IdentityStrategy {
@@ -481,6 +499,36 @@ fn resolve_identity(
     match &options.identity_strategy {
         IdentityStrategy::DirectTls => connection_identity(conn, options.identity_policy),
         IdentityStrategy::ReverseProxyHeader(provider) => provider.verified_identity(headers),
+        // The Tier-3 identity binds the request hash and is resolved AFTER object
+        // verification (inside the proxy), so it is intentionally absent here.
+        IdentityStrategy::LbAssertion => None,
+    }
+}
+
+/// Extract the raw Tier-3 ingress-assertion header value to hand to the
+/// post-verification LB check (issue #71), under the [`IdentityStrategy::LbAssertion`]
+/// strategy ONLY. The header is fetched case-insensitively and fails CLOSED on a
+/// DUPLICATE: a single header value is returned only when EXACTLY one is present.
+///
+/// Returns `Some(value)` for a single present header; `None` when the strategy is
+/// not LB-assertion, when the header is absent (the proxy then fails closed because
+/// the LB verifier requires it), or when the header is duplicated (a downstream
+/// injection attempt — fail closed). The `None`-on-duplicate behaviour mirrors the
+/// reverse-proxy provider's duplicate-trust-header rule: the proxy's required-header
+/// guard turns the resulting `None` into a closed rejection.
+fn assertion_header<'a>(
+    options: &ServerOptions,
+    headers: &'a RequestHeaders,
+) -> Option<&'a str> {
+    match options.identity_strategy {
+        IdentityStrategy::LbAssertion => {
+            // Fail closed on a duplicated trust header before reading any value.
+            if headers.count(MCP_INGRESS_ASSERTION_HEADER) != 1 {
+                return None;
+            }
+            headers.first(MCP_INGRESS_ASSERTION_HEADER)
+        }
+        _ => None,
     }
 }
 
@@ -659,6 +707,29 @@ pub fn serve_once<H>(
 where
     H: FnOnce(&[u8], Option<TransportIdentity>) -> Vec<u8>,
 {
+    // Adapt the 2-arg handler to the assertion-aware form (the assertion header is
+    // ignored — this entry point predates Tier-3 and stays byte-for-byte for its
+    // many callers). The Tier-3 serve path uses [`serve_once_with_assertion`].
+    serve_once_with_assertion(listener, config, options, |request, identity, _assertion| {
+        handler(request, identity)
+    })
+}
+
+/// As [`serve_once`], but the handler ALSO receives the raw Tier-3 ingress-assertion
+/// header value (issue #71) when the [`IdentityStrategy::LbAssertion`] strategy is
+/// active. Under any other strategy the third argument is always `None`. This is the
+/// entry point the production serve loop uses so the assertion can reach the proxy's
+/// post-verification LB check (`Proxy::with_lb_assertion`); a duplicated assertion
+/// header yields `None` (fail closed at the proxy's required-header guard).
+pub fn serve_once_with_assertion<H>(
+    listener: &TcpListener,
+    config: Arc<ServerConfig>,
+    options: &ServerOptions,
+    handler: H,
+) -> io::Result<Option<TransportIdentity>>
+where
+    H: FnOnce(&[u8], Option<TransportIdentity>, Option<&str>) -> Vec<u8>,
+{
     let (tcp, _peer) = listener.accept()?;
     apply_socket_timeouts(&tcp, &options.limits)?;
     let conn = ServerConnection::new(config).map_err(|e| io::Error::other(e.to_string()))?;
@@ -669,6 +740,7 @@ where
     let request = read_http_request(&mut stream, &options.limits)?;
     let headers = RequestHeaders::parse(&request.header_block);
     let identity = resolve_identity(&stream.conn, options, &headers);
+    let assertion = assertion_header(options, &headers);
     // Enforce the per-connection rejection guards (max client-cert lifetime, then
     // online OCSP revocation under the `online_ocsp` feature) BEFORE the handler
     // (inner never reached when rejected).
@@ -676,7 +748,7 @@ where
         .or_else(|| routing_header_rejection(&headers, &request.body))
     {
         Some(error) => error,
-        None => handler(&request.body, identity.clone()),
+        None => handler(&request.body, identity.clone(), assertion),
     };
     write_http_response(&mut stream, &response)?;
     // Clean TLS shutdown: send close_notify so the peer does not see an

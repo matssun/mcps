@@ -282,7 +282,7 @@ fn satisfied_transport_binding_does_not_rescue_failed_authz() {
     let request = signed_request("nonce-authz-bind", "delete_everything", "echo", true);
     let id = TransportIdentity::new(SIGNER, IdentitySource::UriSan);
 
-    let response = proxy.handle_with_transport(&request, now(), Some(&id));
+    let response = proxy.handle_with_transport(&request, now(), Some(&id), None);
 
     assert_eq!(calls.borrow().len(), 0, "denied request must NOT reach the inner");
     assert_eq!(error_message(&response), "mcps.authorization_scope_denied");

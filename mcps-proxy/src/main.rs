@@ -363,6 +363,30 @@ fn run() -> Result<(), String> {
     if config.binding == BindingKind::Exact {
         proxy = proxy.with_transport_binding(Box::new(ExactMatchBinding::new()));
     }
+    // ADR-MCPS-023 Tier 3 (issue #71): LB-signed, request-bound ingress assertion.
+    // The verified transport identity comes from a cryptographically-verified
+    // assertion bound to THIS request's hash (checked post-verification, inside the
+    // proxy), then binds to the request signer through the SAME ExactMatchBinding
+    // the direct-TLS path uses. `parse_args` already required at least one trusted
+    // `--ingress-lb-key`. Honestly downgraded — NOT end_to_end_mtls.
+    if config.binding == BindingKind::LbAssertion {
+        let lb_assertion = cli::build_lb_assertion_binding(&config)?
+            .ok_or("internal error: lb-assertion binding selected but no verifier built")?;
+        eprintln!(
+            "mcps-proxy: transport binding = LB-signed request-bound ingress assertion \
+             ({} trusted LB key(s), guarantee '{}', identity field {:?}, header '{}'). This is \
+             request-bound INGRESS assertion, NOT end-to-end client-node mTLS: the LB terminates \
+             the client's mTLS and re-asserts identity; the node verifies the LB signature + the \
+             request-hash binding, not the client's own key.",
+            config.ingress_lb_keys.len(),
+            mcps_proxy::LbAssertionBinding::GUARANTEE,
+            config.identity_source,
+            tls::MCP_INGRESS_ASSERTION_HEADER,
+        );
+        proxy = proxy
+            .with_transport_binding(Box::new(ExactMatchBinding::new()))
+            .with_lb_assertion(lb_assertion);
+    }
 
     // Offline client-cert CRLs (#3839). Loaded once at startup; a missing or
     // malformed CRL file fails closed here. OFFLINE revocation only — there is no
@@ -414,13 +438,24 @@ fn run() -> Result<(), String> {
     // identity from the verified peer certificate; reverse-proxy mode reads it from
     // the trusted forwarded header and ignores the local client cert. These are
     // mutually exclusive on a connection (enforced at parse time, honoured here).
-    let identity_strategy = match &config.reverse_proxy_identity_header {
-        None => IdentityStrategy::DirectTls,
-        Some(header) => IdentityStrategy::ReverseProxyHeader(ReverseProxyMtlsProvider::new(
-            header.clone(),
-            config.reverse_proxy_header_format,
-            config.identity_source,
-        )),
+    // ADR-MCPS-023 Tier 3 (issue #71): under `--transport-binding lb-assertion` the
+    // identity is NOT resolved at the connection seam — it is carried by the signed,
+    // request-bound assertion header and verified post-verification inside the proxy.
+    // The serve loop therefore selects the LbAssertion strategy so it extracts the
+    // assertion header (failing closed on a duplicate) instead of reading a local
+    // client cert or a forwarded identity header. The three strategies are mutually
+    // exclusive; the CLI forbids combining lb-assertion with a reverse-proxy header.
+    let identity_strategy = if config.binding == BindingKind::LbAssertion {
+        IdentityStrategy::LbAssertion
+    } else {
+        match &config.reverse_proxy_identity_header {
+            None => IdentityStrategy::DirectTls,
+            Some(header) => IdentityStrategy::ReverseProxyHeader(ReverseProxyMtlsProvider::new(
+                header.clone(),
+                config.reverse_proxy_header_format,
+                config.identity_source,
+            )),
+        }
     };
     // #4030 ONLINE OCSP client-cert revocation. Built only under the
     // `online_ocsp` feature; `parse_args` already fails closed for
@@ -464,9 +499,14 @@ fn run() -> Result<(), String> {
     // threaded interior state, so connections are handled one at a time.
     loop {
         let config_arc = Arc::clone(&server_config);
-        if let Err(e) = tls::serve_once(&listener, config_arc, &serve_options, |request, identity| {
-            proxy.handle_with_transport(request, now_unix(), identity.as_ref())
-        }) {
+        if let Err(e) = tls::serve_once_with_assertion(
+            &listener,
+            config_arc,
+            &serve_options,
+            |request, identity, assertion| {
+                proxy.handle_with_transport(request, now_unix(), identity.as_ref(), assertion)
+            },
+        ) {
             // A single rejected/aborted connection (e.g. failed mTLS) must not
             // bring the server down — log and keep serving.
             eprintln!("mcps-proxy: connection error: {e}");

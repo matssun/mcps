@@ -48,6 +48,7 @@ use serde_json::Value;
 use crate::inner_launch::InnerLogEvent;
 use crate::inner_launch::InnerLogSink;
 use crate::key_source::ResponseSigner;
+use crate::transport::LbAssertionBinding;
 use crate::transport::TransportBindingPolicy;
 use crate::transport::TransportIdentity;
 
@@ -95,6 +96,16 @@ pub struct Proxy {
     replay: RefCell<Box<dyn ReplayCache>>,
     policy: Option<PolicyEnforcement>,
     transport_binding: Option<Box<dyn TransportBindingPolicy>>,
+    /// Optional ADR-MCPS-023 Tier 3 (issue #71) LB-signed, request-bound ingress
+    /// assertion verifier. Unlike `transport_binding` — whose identity is resolved
+    /// from the connection BEFORE verification — an LB assertion binds
+    /// `verified.request_hash`, so it can only be checked AFTER object verification.
+    /// When set, the post-verification path REQUIRES a presented assertion header,
+    /// cryptographically verifies it against the in-hand request hash, and feeds the
+    /// resulting verified [`TransportIdentity`] into `transport_binding` so the
+    /// signer↔identity binding still applies. A `Proxy` built without this ignores
+    /// the assertion header entirely.
+    lb_assertion: Option<LbAssertionBinding>,
     /// Optional MCPS-036 lifecycle-event sink for the two proxy-level events
     /// (`inner_request_forwarded`, `inner_response_signed`). Inner-process-level
     /// events (spawn/exit/stderr) are emitted by the `SubprocessInner` itself.
@@ -136,6 +147,7 @@ impl Proxy {
             replay: RefCell::new(Box::new(InMemoryReplayCache::new(max_clock_skew_secs))),
             policy: None,
             transport_binding: None,
+            lb_assertion: None,
             log_sink: None,
         }
     }
@@ -191,21 +203,52 @@ impl Proxy {
         self
     }
 
+    /// Enable opt-in ADR-MCPS-023 Tier 3 (issue #71) LB-signed, request-bound
+    /// ingress assertion verification. After object verification (and any
+    /// authorization policy) and BEFORE dispatch, the presented assertion header
+    /// (passed to [`Proxy::handle_with_transport`]) is cryptographically verified
+    /// against the in-hand `verified.request_hash`: a missing-but-required header,
+    /// an unknown LB key, a bad signature, a cross-request hash, or a stale
+    /// assertion ALL fail closed with `mcps.transport_binding_failed` and the inner
+    /// server is never reached. On success the verifier yields a verified
+    /// [`TransportIdentity`] which is fed into the configured transport-binding
+    /// policy so the request signer↔identity binding still applies (the LB binding
+    /// does not replace it — it SUPPLIES the identity the policy then checks). This
+    /// is honestly downgraded — request-bound ingress assertion, NOT end-to-end
+    /// client↔node mTLS (see [`LbAssertionBinding::GUARANTEE`]). A `Proxy` built
+    /// without this ignores the assertion header entirely.
+    pub fn with_lb_assertion(mut self, lb_assertion: LbAssertionBinding) -> Self {
+        self.lb_assertion = Some(lb_assertion);
+        self
+    }
+
     /// Handle one inbound request without a transport identity (stdio / no mTLS).
-    /// Equivalent to [`Proxy::handle_with_transport`] with `identity = None`.
+    /// Equivalent to [`Proxy::handle_with_transport`] with `identity = None` and no
+    /// LB-assertion header. When an LB-assertion verifier is configured this fails
+    /// closed (a required assertion header is absent).
     pub fn handle(&self, request_bytes: &[u8], now_unix: i64) -> Vec<u8> {
-        self.handle_with_transport(request_bytes, now_unix, None)
+        self.handle_with_transport(request_bytes, now_unix, None, None)
     }
 
     /// Handle one inbound request carrying the connection's verified transport
     /// identity (mTLS): verify, then (on success) authorization policy, then
     /// transport binding, then strip + forward + sign — or, on any failure, an
     /// unsigned JSON-RPC error WITHOUT touching the inner server. Never panics.
+    ///
+    /// `lb_assertion_header` carries the raw presented Tier-3 ingress-assertion
+    /// header value (issue #71), if any. It is consulted ONLY when an
+    /// [`LbAssertionBinding`] is configured (via [`Proxy::with_lb_assertion`]): the
+    /// assertion can only be checked AFTER verification (it binds
+    /// `verified.request_hash`), so it cannot flow through the pre-resolved
+    /// `transport_identity` seam. When the LB verifier is configured the header is
+    /// REQUIRED — its absence, or any assertion rejection, fails closed before
+    /// dispatch.
     pub fn handle_with_transport(
         &self,
         request_bytes: &[u8],
         now_unix: i64,
         transport_identity: Option<&TransportIdentity>,
+        lb_assertion_header: Option<&str>,
     ) -> Vec<u8> {
         let parsed: Option<Value> = serde_json::from_slice(request_bytes).ok();
         let id_value = parsed
@@ -246,10 +289,51 @@ impl Proxy {
                         return json_rpc_authorization_error(&err, &id_value);
                     }
                 }
-                // Phase 6 (ADR-MCPS-014): bind the verified signer to the mTLS
-                // channel identity. Fail closed before dispatch.
+                // ADR-MCPS-023 Tier 3 (issue #71): when an LB-signed, request-bound
+                // ingress assertion verifier is configured, the verified transport
+                // identity comes from a CRYPTOGRAPHICALLY-VERIFIED assertion bound to
+                // THIS request's hash — not from the pre-resolved `transport_identity`
+                // seam (that identity is resolved before verification, so it cannot
+                // carry the request-hash binding). Require the header, verify it, and
+                // on success substitute the verified identity for the binding check
+                // below; any rejection (missing header, unknown key, bad signature,
+                // cross-request hash, stale) fails closed before dispatch. Object
+                // verification has ALREADY run above and is independent of this — a
+                // tampered object signature never reaches here regardless of a valid
+                // assertion.
+                let lb_verified_identity: Option<TransportIdentity> = match &self.lb_assertion {
+                    None => None,
+                    Some(lb) => {
+                        let header = match lb_assertion_header {
+                            Some(value) => value,
+                            // Required-but-absent assertion header → fail closed.
+                            None => {
+                                return json_rpc_error_object(
+                                    &McpsError::TransportBindingFailed,
+                                    &id_value,
+                                )
+                            }
+                        };
+                        match lb.verify(header, &verified.request_hash, now_unix) {
+                            Ok(identity) => Some(identity),
+                            // Any LbAssertionRejection maps to the transport-boundary
+                            // wire token; the inner server is never reached.
+                            Err(_rejection) => {
+                                return json_rpc_error_object(
+                                    &McpsError::TransportBindingFailed,
+                                    &id_value,
+                                )
+                            }
+                        }
+                    }
+                };
+                // Phase 6 (ADR-MCPS-014): bind the verified signer to the channel
+                // identity. With an LB assertion configured, the identity is the one
+                // the assertion just verified (request-bound); otherwise it is the
+                // pre-resolved `transport_identity`. Fail closed before dispatch.
                 if let Some(binding) = &self.transport_binding {
-                    if let Err(err) = binding.check(&verified.verified_signer, transport_identity) {
+                    let identity = lb_verified_identity.as_ref().or(transport_identity);
+                    if let Err(err) = binding.check(&verified.verified_signer, identity) {
                         return json_rpc_error_object(&err, &id_value);
                     }
                 }
