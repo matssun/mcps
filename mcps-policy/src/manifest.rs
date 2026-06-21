@@ -36,8 +36,8 @@
 //! (RequestEnvelope/ResponseEnvelope/SignatureBlock) and `reference.rs` (its
 //! grant DTOs + `mint_reference_grant`) they live in one module.
 
-use mcps_core::canonicalize;
 use mcps_core::canonicalize_json_value;
+use mcps_core::parse;
 use mcps_core::sha256_hash_id;
 use mcps_core::SigningKey;
 use mcps_core::SIG_ALG_ED25519;
@@ -253,11 +253,13 @@ pub fn manifest_signing_preimage(manifest: &ToolManifest) -> Result<Vec<u8>, Man
 /// canonicalized last-wins on the signing/verify path rather than rejected — the
 /// exact MCPS-02 / ADR-MCPS-005 semantic-divergence class the Core request path
 /// guards against. We therefore first run the raw-bytes, dup-key-REJECTING
-/// `mcps_core::canonicalize` over the original bytes (it parses with the in-house
-/// value model that surfaces duplicate members and the full JCS-safe domain), and
-/// only on success deserialize into the typed `ToolManifest`. Any duplicate
-/// member, JCS-domain violation, or shape mismatch →
-/// [`ManifestError::ManifestMalformed`].
+/// `mcps_core::parse` over the original bytes (it parses with the in-house value
+/// model that surfaces duplicate members and the full JCS-safe domain). `parse`
+/// — not `canonicalize` — is the right primitive here: we only need the
+/// fail-closed VALIDATION, not the canonical output bytes, so this avoids
+/// building (and discarding) the canonical string on every parse. Only on
+/// success do we deserialize into the typed `ToolManifest`. Any duplicate member,
+/// JCS-domain violation, or shape mismatch → [`ManifestError::ManifestMalformed`].
 ///
 /// Complementarily, the signed-object structs ([`ToolManifest`],
 /// [`ManifestSignature`], [`ToolEntry`]) carry `#[serde(deny_unknown_fields)]`, so
@@ -273,7 +275,8 @@ pub fn manifest_signing_preimage(manifest: &ToolManifest) -> Result<Vec<u8>, Man
 pub fn parse_manifest_bytes(bytes: &[u8]) -> Result<ToolManifest, ManifestError> {
     // (1) Reject duplicate object members (and the rest of the JCS-safe domain) on
     // the ORIGINAL wire bytes, BEFORE any serde_json::Value collapses duplicates.
-    canonicalize(bytes).map_err(|_| ManifestError::ManifestMalformed)?;
+    // `parse` performs the full validation without allocating the canonical output.
+    parse(bytes).map_err(|_| ManifestError::ManifestMalformed)?;
     // (2) Now safe to deserialize into the typed manifest; `deny_unknown_fields`
     // on the signed-object structs rejects any extra/unknown member here.
     serde_json::from_slice(bytes).map_err(|_| ManifestError::ManifestMalformed)
