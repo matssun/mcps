@@ -108,7 +108,13 @@ impl<C: Clock, N: NonceSource> HostSession<C, N> {
 
         let nonce = self.next_nonce();
         let issued_unix = self.clock.now_unix();
-        let expires_unix = issued_unix + self.request_lifetime_secs;
+        // Fail closed on freshness-window overflow rather than panic (debug) or
+        // wrap to a stale past `expires_at` (release): an extreme configured
+        // `request_lifetime_secs` plus a pathological clock could overflow this
+        // i64 add. A request whose expiry cannot be computed must not be signed.
+        let expires_unix = issued_unix
+            .checked_add(self.request_lifetime_secs)
+            .ok_or(McpsError::CanonicalizationFailed)?;
         let issued_at = unix_to_rfc3339_utc(issued_unix);
         let expires_at = unix_to_rfc3339_utc(expires_unix);
 

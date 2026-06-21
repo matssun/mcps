@@ -444,6 +444,26 @@ fn custom_lifetime_drives_expires_at() {
     assert_eq!(envelope["expires_at"], json!("2026-05-28T20:01:00Z"));
 }
 
+#[test]
+fn freshness_window_overflow_fails_closed_instead_of_panicking() {
+    // An extreme request lifetime plus a near-i64::MAX clock would overflow the
+    // `issued_unix + request_lifetime_secs` add: a debug build panics, a release
+    // build wraps to a stale-past expires_at. The session must instead refuse to
+    // sign (fail closed), never emit a request with a wrapped/past expiry.
+    let mut session = HostSession::new(
+        host_signer(),
+        FixedClock::new(i64::MAX),
+        SeededNonceSource::new(&[0xABu8; 32]),
+        i64::MAX,
+    );
+    let id = Value::String("req-overflow".to_string());
+    let result =
+        session.sign_tool_call(&id, "echo", json!({ "text": "x" }), ON_BEHALF_OF, AUDIENCE, AUTH_HASH);
+    assert_eq!(result.err(), Some(McpsError::CanonicalizationFailed));
+    // Fail-closed signing leaves no pending entry behind.
+    assert_eq!(session.pending_count(), 0);
+}
+
 // --- transport-free guard (ADR-MCPS-015 "Compliance and Enforcement") --------
 
 /// The committed crate manifest and BUILD file, baked in at COMPILE time from
