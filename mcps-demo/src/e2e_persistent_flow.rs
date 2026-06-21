@@ -301,14 +301,14 @@ fn run_authorized_call(
     let verified_result = session
         .verify_and_unwrap_response(&response, &response_resolver(fixtures))
         .map_err(|e| PersistentE2eError::Verify(format!("{e:?}")))?;
-    let verified = verified_result.verified;
-    if verified.request_hash != stored_hash {
+    let (verified, unwrapped) = verified_result.into_parts();
+    if verified.request_hash() != stored_hash {
         return Err(PersistentE2eError::Verify(
             "verified response did not bind to the stored request hash".to_string(),
         ));
     }
 
-    let result = match verified_result.unwrapped {
+    let result = match unwrapped {
         UnwrappedResult::Object(value) | UnwrappedResult::Scalar(value) => value,
         UnwrappedResult::InnerError(inner) => {
             return Err(PersistentE2eError::AuthorizedError(inner.to_string()));
@@ -320,7 +320,7 @@ fn run_authorized_call(
         tool: call.tool.to_string(),
         signer: fixtures.signer().to_string(),
         request_hash: stored_hash,
-        server_signer: verified.server_signer,
+        server_signer: verified.server_signer().to_string(),
         result,
         response_bytes: response,
     })

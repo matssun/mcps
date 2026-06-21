@@ -192,8 +192,8 @@ fn verify_response_uses_stored_hash_not_a_caller_value() {
     let verified = session
         .verify_response(&good, &server_resolver())
         .expect("session verifies bound response against the stored hash");
-    assert_eq!(verified.server_signer, SERVER);
-    assert_eq!(verified.request_hash, expected_hash);
+    assert_eq!(verified.server_signer(), SERVER);
+    assert_eq!(verified.request_hash(), expected_hash);
 }
 
 #[test]

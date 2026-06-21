@@ -271,8 +271,8 @@ pub fn run_positive_e2e(
     let verified_result = session
         .verify_and_unwrap_response(&response, &response_resolver(fixtures))
         .map_err(|e| E2eError::Verify(format!("{e:?}")))?;
-    let verified = verified_result.verified;
-    if verified.request_hash != stored_hash {
+    let (verified, unwrapped) = verified_result.into_parts();
+    if verified.request_hash() != stored_hash {
         return Err(E2eError::Verify(
             "verified response did not bind to the stored request hash".to_string(),
         ));
@@ -285,7 +285,7 @@ pub fn run_positive_e2e(
 
     // The fileserver returns an OBJECT result signed in place, so the unwrapped
     // payload is that object with the signature `_meta` stripped.
-    let result_payload = match verified_result.unwrapped {
+    let result_payload = match unwrapped {
         UnwrappedResult::Object(value) | UnwrappedResult::Scalar(value) => value,
         UnwrappedResult::InnerError(inner) => {
             return Err(E2eError::InnerError(inner.to_string()));
@@ -310,7 +310,7 @@ pub fn run_positive_e2e(
         audience: fixtures.audience().to_string(),
         request_hash: stored_hash,
         authorization_hash,
-        server_signer: verified.server_signer,
+        server_signer: verified.server_signer().to_string(),
         entries,
     })
 }

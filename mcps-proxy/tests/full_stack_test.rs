@@ -452,7 +452,7 @@ fn full_stack_cli_security_matrix() {
         // The signed response verifies and binds to the request hash.
         let verified = verify_response(&body, &server_resolver(), &expected_hash)
             .expect("signed response verifies and binds");
-        assert_eq!(verified.server_signer, SERVER);
+        assert_eq!(verified.server_signer(), SERVER);
     }
 
     // 2. No client certificate → rejected at the handshake.

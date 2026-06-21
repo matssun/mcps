@@ -191,7 +191,7 @@ fn enforced_in_scope_request_is_allowed_and_signed() {
     );
     let verified = verify_response(&response, &server_resolver(), &expected_hash)
         .expect("response verifies and binds");
-    assert_eq!(verified.server_signer, SERVER);
+    assert_eq!(verified.server_signer(), SERVER);
 }
 
 #[test]

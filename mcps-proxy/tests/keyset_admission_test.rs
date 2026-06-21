@@ -100,8 +100,8 @@ fn per_node_keyset_node_a_and_node_b_accepted() {
 
     let verified_a = verify_response(&resp_a, &resolver, REQUEST_HASH).expect("node-a accepted");
     let verified_b = verify_response(&resp_b, &resolver, REQUEST_HASH).expect("node-b accepted");
-    assert_eq!(verified_a.key_id, "node-a");
-    assert_eq!(verified_b.key_id, "node-b");
+    assert_eq!(verified_a.key_id(), "node-a");
+    assert_eq!(verified_b.key_id(), "node-b");
 }
 
 #[test]

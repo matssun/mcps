@@ -426,8 +426,8 @@ fn caller_supplied_verified_metadata_is_stripped_and_replaced() {
     let verified = cl
         .verify_response(&response, &server_resolver())
         .expect("client verifies the signed response: sidecar replaced the impostor .verified");
-    assert_eq!(verified.server_signer, SERVER);
-    assert_eq!(verified.request_hash, stored_hash);
+    assert_eq!(verified.server_signer(), SERVER);
+    assert_eq!(verified.request_hash(), stored_hash);
 }
 
 // ----- Case 8: valid signature, failed Phase 5 authorization -------------------

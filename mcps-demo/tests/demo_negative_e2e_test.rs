@@ -709,8 +709,8 @@ fn a7_smuggled_verified_metadata_stripped_and_replaced_over_wire() {
     let verified = cl
         .verify_response(&response, &response_resolver(&fixtures))
         .expect("client verifies the signed response: sidecar replaced the impostor .verified");
-    assert_eq!(verified.server_signer, fixtures.server_signer());
-    assert_eq!(verified.request_hash, stored_hash);
+    assert_eq!(verified.server_signer(), fixtures.server_signer());
+    assert_eq!(verified.request_hash(), stored_hash);
     // The signed response's verified context names the REAL signer, not the
     // forged impostor verifier.
     let value: Value = serde_json::from_slice(&response).expect("parse response");

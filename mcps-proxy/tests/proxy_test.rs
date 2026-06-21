@@ -160,7 +160,7 @@ fn verified_request_is_forwarded_stripped_and_response_is_signed() {
     // The response is signed by the server key and binds to the request.
     let verified = verify_response(&response, &server_resolver(), &expected_hash)
         .expect("proxy response verifies and binds");
-    assert_eq!(verified.server_signer, SERVER);
+    assert_eq!(verified.server_signer(), SERVER);
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn non_exporting_signer_drives_response_signing_and_verifies() {
 
     let verified = verify_response(&response, &response_resolver, &expected_hash)
         .expect("response signed via the delegation seam verifies under the advertised public key");
-    assert_eq!(verified.server_signer, SERVER);
+    assert_eq!(verified.server_signer(), SERVER);
 }
 
 // ---------------------------------------------------------------------------
@@ -369,8 +369,8 @@ fn roundtrip_scalar_result_is_restored_to_the_scalar() {
         .verify_and_unwrap_response(&response, &server_resolver())
         .expect("verify + unwrap");
     // The consumer sees the original scalar 42 — NOT the {"value":42} wrapper.
-    assert_eq!(outcome.unwrapped, UnwrappedResult::Scalar(json!(42)));
-    assert!(!outcome.unwrapped.is_inner_error());
+    assert_eq!(outcome.unwrapped(), &UnwrappedResult::Scalar(json!(42)));
+    assert!(!outcome.unwrapped().is_inner_error());
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn roundtrip_array_result_is_restored_to_the_array() {
     let outcome = session
         .verify_and_unwrap_response(&response, &server_resolver())
         .expect("verify + unwrap");
-    assert_eq!(outcome.unwrapped, UnwrappedResult::Scalar(json!([1, 2, 3])));
+    assert_eq!(outcome.unwrapped(), &UnwrappedResult::Scalar(json!([1, 2, 3])));
 }
 
 #[test]
@@ -396,7 +396,7 @@ fn roundtrip_object_result_is_returned_unchanged_minus_meta() {
         .verify_and_unwrap_response(&response, &server_resolver())
         .expect("verify + unwrap");
     // Signed in place: the object comes back unchanged, just without `_meta`.
-    assert_eq!(outcome.unwrapped, UnwrappedResult::Object(inner_object));
+    assert_eq!(outcome.unwrapped(), &UnwrappedResult::Object(inner_object));
 }
 
 #[test]
@@ -417,10 +417,10 @@ fn roundtrip_inner_error_surfaces_as_an_error_not_a_success() {
     // read the raw wire `result` = {"inner_error":…,"_meta":…} as a SUCCESS — see
     // `roundtrip_inner_error_is_a_success_without_unwrap` for that proof.
     assert!(
-        outcome.unwrapped.is_inner_error(),
+        outcome.unwrapped().is_inner_error(),
         "inner error must surface as an error"
     );
-    match outcome.unwrapped {
+    match outcome.unwrapped() {
         UnwrappedResult::InnerError(inner) => {
             assert_eq!(inner["error"]["code"], json!(-32000));
         }

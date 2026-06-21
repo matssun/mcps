@@ -130,14 +130,51 @@ pub struct VerifiedRequest {
 }
 
 /// The successful outcome of [`verify_response`] (MCPS_SPEC §9).
+///
+/// This is a PROOF token: per ADR-MCPS-003 the `server_signer` is evidence of key
+/// control, only legitimately produced by the verifier ([`verify_response`]). To
+/// keep the type as evidence, the fields are PRIVATE and the only constructor is
+/// `pub(crate)` — reachable solely from inside this crate's verify path. Downstream
+/// crates can READ the verdict through the accessors but can NOT fabricate a
+/// "verified" verdict by struct-literal construction (issue #83). `#[non_exhaustive]`
+/// additionally blocks any future field from being set by an external literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifiedResponse {
     /// The server signer identity whose key verified the response signature.
-    pub server_signer: String,
+    server_signer: String,
     /// The key id used to verify the response signature.
-    pub key_id: String,
+    key_id: String,
     /// The `request_hash` the response carried (equals the expected hash).
-    pub request_hash: String,
+    request_hash: String,
+}
+
+impl VerifiedResponse {
+    /// Mint a verified verdict. `pub(crate)` ON PURPOSE: the ONLY legitimate
+    /// producer is [`verify_response`] in this crate, so a "verified" token cannot
+    /// be forged from outside `mcps-core` (issue #83 / ADR-MCPS-003 type-as-evidence).
+    pub(crate) fn new(server_signer: String, key_id: String, request_hash: String) -> Self {
+        Self {
+            server_signer,
+            key_id,
+            request_hash,
+        }
+    }
+
+    /// The server signer identity whose key verified the response signature.
+    pub fn server_signer(&self) -> &str {
+        &self.server_signer
+    }
+
+    /// The key id used to verify the response signature.
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// The `request_hash` the response carried (equals the expected hash).
+    pub fn request_hash(&self) -> &str {
+        &self.request_hash
+    }
 }
 
 /// Verify a signed MCP-S request end-to-end (MCPS_SPEC §9 steps 1-12).
@@ -300,11 +337,11 @@ pub fn verify_response(
         return Err(McpsError::ResponseHashMismatch);
     }
 
-    Ok(VerifiedResponse {
-        server_signer: envelope.server_signer,
-        key_id: envelope.signature.key_id,
-        request_hash: envelope.request_hash,
-    })
+    Ok(VerifiedResponse::new(
+        envelope.server_signer,
+        envelope.signature.key_id,
+        envelope.request_hash,
+    ))
 }
 
 /// Step 7 — `authorization_hash` must be present, non-empty, and `sha256:`-
@@ -749,9 +786,9 @@ mod tests {
         let resp_raw = signed_response(&true_hash);
         let verified = verify_response(&resp_raw, &server_resolver(), &true_hash)
             .expect("valid response verifies");
-        assert_eq!(verified.server_signer, SERVER_SIGNER_ID);
-        assert_eq!(verified.key_id, SERVER_KEY_ID);
-        assert_eq!(verified.request_hash, true_hash);
+        assert_eq!(verified.server_signer(), SERVER_SIGNER_ID);
+        assert_eq!(verified.key_id(), SERVER_KEY_ID);
+        assert_eq!(verified.request_hash(), true_hash);
     }
 
     #[test]

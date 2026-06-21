@@ -1048,9 +1048,9 @@ fn pipeline_v3_valid_response_verifies() {
     let raw = fixture_bytes("v3_valid_response.json");
     let verified = verify_response(&raw, &server_trust_resolver(), &true_hash)
         .expect("V3 must verify through the pipeline");
-    assert_eq!(verified.server_signer, SERVER_SIGNER_ID);
-    assert_eq!(verified.key_id, SERVER_KEY_ID);
-    assert_eq!(verified.request_hash, true_hash);
+    assert_eq!(verified.server_signer(), SERVER_SIGNER_ID);
+    assert_eq!(verified.key_id(), SERVER_KEY_ID);
+    assert_eq!(verified.request_hash(), true_hash);
 }
 
 #[test]

@@ -124,8 +124,8 @@ fn host_verifies_signed_response_and_binding() {
     let good = signed_response(&expected_hash);
     let verified = verify_response(&good, &server_resolver(), &expected_hash)
         .expect("host verifies bound response");
-    assert_eq!(verified.server_signer, SERVER);
-    assert_eq!(verified.request_hash, expected_hash);
+    assert_eq!(verified.server_signer(), SERVER);
+    assert_eq!(verified.request_hash(), expected_hash);
 }
 
 #[test]

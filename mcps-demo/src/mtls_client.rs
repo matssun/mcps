@@ -169,7 +169,7 @@ impl<C: Clock, N: NonceSource> MtlsClientRunner<C, N> {
             request_hash: stored_hash,
             tool: tool.to_string(),
             path: path.to_string(),
-            server_signer: verified.server_signer,
+            server_signer: verified.server_signer().to_string(),
         })
     }
 

@@ -175,7 +175,7 @@ fn proxy_spawns_fileserver_and_tools_list_flows_through() {
     assert!(response.get("error").is_none(), "response: {response}");
     let verified = verify_response(&response_bytes, &server_resolver(), &expected_hash)
         .expect("proxy response verifies + binds to request_hash");
-    assert_eq!(verified.server_signer, SERVER);
+    assert_eq!(verified.server_signer(), SERVER);
     let tools = response["result"]["tools"].as_array().expect("tools array");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["name"], "list_files");
@@ -225,7 +225,7 @@ fn caller_supplied_verified_metadata_is_stripped_before_the_inner_server() {
     let verified = verify_response(&response_bytes, &server_resolver(), &expected_hash)
         .expect("response verifies + binds: the sidecar (not the impostor) is the verifier");
     assert_eq!(
-        verified.server_signer, SERVER,
+        verified.server_signer(), SERVER,
         "the SIDECAR signs as SERVER; the impostor verifier was discarded"
     );
     let result = &response["result"];

@@ -243,9 +243,9 @@ fn authorized_list_files_round_trips_client_through_proxy_to_inner() {
     let verified = client
         .verify_response(&response, &server_resolver())
         .expect("client verifies the signed response against the stored request hash");
-    assert_eq!(verified.server_signer, SERVER);
+    assert_eq!(verified.server_signer(), SERVER);
     assert_eq!(
-        verified.request_hash, stored_hash,
+        verified.request_hash(), stored_hash,
         "the verified response binds to the request hash the client stored"
     );
 

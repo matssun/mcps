@@ -284,7 +284,7 @@ fn run() -> Result<(), String> {
     let verified_response = client
         .verify_response(&response, &server_resolver())
         .map_err(|e| format!("client verify_response: {e:?}"))?;
-    if verified_response.request_hash != stored_hash {
+    if verified_response.request_hash() != stored_hash {
         return Err("verified response did not bind to the stored request hash".to_string());
     }
     if client.pending_count() != 0 {
@@ -301,7 +301,7 @@ fn run() -> Result<(), String> {
         .collect();
     println!(
         "response-verified server_signer={} request_hash={} entries={:?}",
-        verified_response.server_signer, verified_response.request_hash, names,
+        verified_response.server_signer(), verified_response.request_hash(), names,
     );
     println!("lifecycle-events {:?}", sink.event_tags());
     println!("OK: authorized list_files round-tripped client -> proxy -> inner -> client");

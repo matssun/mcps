@@ -395,12 +395,12 @@ fn run() -> Result<(), String> {
         let verified = cl
             .verify_response(&response, &server_resolver())
             .map_err(|e| format!("case 7 verify_response: {e:?}"))?;
-        if verified.server_signer != SERVER || verified.request_hash != stored {
+        if verified.server_signer() != SERVER || verified.request_hash() != stored {
             return Err("case 7: sidecar did not replace the impostor .verified".to_string());
         }
         println!(
             "denial case={:<24} reason={:<36} inner_reached={} (impostor .verified stripped; verifier={})",
-            "7_caller_verified", "stripped+replaced", sink.inner_was_reached(), verified.server_signer,
+            "7_caller_verified", "stripped+replaced", sink.inner_was_reached(), verified.server_signer(),
         );
     }
 

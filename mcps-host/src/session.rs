@@ -208,10 +208,7 @@ impl<C: Clock, N: NonceSource> HostSession<C, N> {
             .map_err(|_| McpsError::CanonicalizationFailed)?;
         let result = value.get("result").ok_or(McpsError::MissingEnvelope)?;
         let unwrapped = unwrap_verified_result(result)?;
-        Ok(VerifiedResult {
-            verified,
-            unwrapped,
-        })
+        Ok(VerifiedResult::new(verified, unwrapped))
     }
 
     /// The request hash stored for `id`, if a request is pending under it.

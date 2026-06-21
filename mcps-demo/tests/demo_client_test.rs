@@ -130,8 +130,8 @@ fn client_verifies_a_response_bound_to_the_stored_hash() {
     let verified = client
         .verify_response(&good, &server_resolver())
         .expect("client verifies the bound response against the stored hash");
-    assert_eq!(verified.server_signer, SERVER);
-    assert_eq!(verified.request_hash, expected_hash);
+    assert_eq!(verified.server_signer(), SERVER);
+    assert_eq!(verified.request_hash(), expected_hash);
     // Success-path eviction: the id is free again.
     assert_eq!(client.pending_count(), 0);
 }

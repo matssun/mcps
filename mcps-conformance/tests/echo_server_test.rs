@@ -104,8 +104,8 @@ fn valid_request_yields_signed_bound_response() {
     // The response verifies under the server key and binds to the request hash.
     let verified = verify_response(&resp, &response_resolver(), &expected_hash)
         .expect("response should verify and bind");
-    assert_eq!(verified.server_signer, SERVER);
-    assert_eq!(verified.request_hash, expected_hash);
+    assert_eq!(verified.server_signer(), SERVER);
+    assert_eq!(verified.request_hash(), expected_hash);
 
     // The echoed text round-trips.
     let v: Value = serde_json::from_slice(&resp).unwrap();
