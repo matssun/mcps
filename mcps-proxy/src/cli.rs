@@ -1408,11 +1408,12 @@ pub fn strict_violations(config: &Config) -> Vec<String> {
     // assessed by the tier check below.
     if config.replay == ReplayKind::Memory {
         violations.push(
-            "--replay-cache memory (the default) keeps admitted nonces only in process \
-             memory, so a proxy RESTART forgets them and re-opens a replay window for any \
-             still-fresh captured envelope until its expires_at+skew; production must use a \
-             durable replay store: --replay-cache file (single-node durability) or \
-             --replay-cache shared (horizontal durability)"
+            "--replay-cache memory is non-durable: it keeps admitted nonces only in process \
+             memory (and is the cache used when --replay-cache is omitted), so a proxy RESTART \
+             forgets them and re-opens a replay window for any still-fresh captured envelope \
+             until its expires_at+skew; production must use a durable replay store: \
+             --replay-cache file (single-node durability) or --replay-cache shared (horizontal \
+             durability)"
                 .to_string(),
         );
     }
