@@ -254,6 +254,16 @@ pub struct Config {
     /// Allow the (dev/CI-only) environment-variable key source in this run.
     /// Required when `key_source == Env`; absent, env keys are refused.
     pub allow_env_keysource: bool,
+    /// Explicit acknowledgement that `--authz reference` may be the sole production
+    /// authorization authority (ADR-MCPS-013). The reference profile is a real,
+    /// signature-verifying, fully-bound profile — NOT a noop — but it is a
+    /// CONFORMANCE/reference implementation, explicitly NOT the long-term
+    /// recommendation (Biscuit is the intended first serious external profile).
+    /// Required when `authz == Reference`; absent, that configuration is refused at
+    /// parse time so an operator cannot silently treat the reference profile as the
+    /// production authority. Mirrors `allow_env_keysource` — when set it is also a
+    /// strict-production violation.
+    pub allow_reference_authz: bool,
     /// PKCS#11 module (provider `.so`/`.dylib`) path. Required when
     /// `key_source == Pkcs11` (issue #4034).
     pub pkcs11_module: Option<String>,
@@ -350,6 +360,7 @@ pub struct Config {
 const KNOWN_PROXY_FLAGS: &[&str] = &[
     // Valueless boolean flags.
     "--allow-env-keysource",
+    "--allow-reference-authz",
     "--crl-allow-unknown-status",
     "--ocsp-soft-fail",
     "--gcp-kms-use-metadata",
@@ -470,6 +481,10 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     // plus an explicit acknowledgement to run authz with an empty deny-list.
     let mut revocation_list_paths: Vec<String> = Vec::new();
     let mut allow_empty_revocation = false;
+    // ADR-MCPS-013: explicit acknowledgement that the reference authorization
+    // profile may be the sole production authority. Absent, `--authz reference` is
+    // refused at parse time.
+    let mut allow_reference_authz = false;
     // Inner process model: one-shot by default (preserves the existing behavior
     // for the one-shot-shaped fileserver); persistent fronts a long-lived server.
     let mut inner_mode = InnerModeKind::OneShot;
@@ -555,6 +570,18 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         // revoked — fail-open). Without it, that configuration is refused below.
         if flag == "--allow-empty-revocation" {
             allow_empty_revocation = true;
+            i += 1;
+            continue;
+        }
+        // Valueless boolean flag (ADR-MCPS-013): explicitly accept the reference
+        // authorization profile as the SOLE production authority. The reference
+        // profile is a real, signature-verifying, fully-bound profile (NOT a noop),
+        // but it is a conformance/reference implementation, explicitly NOT the
+        // long-term recommendation. Without this ack, `--authz reference` is refused
+        // below so the reference profile cannot silently serve as the production
+        // authority.
+        if flag == "--allow-reference-authz" {
+            allow_reference_authz = true;
             i += 1;
             continue;
         }
@@ -1227,6 +1254,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         authz,
         revocation_list_paths,
         allow_empty_revocation,
+        allow_reference_authz,
         inner_mode,
         allow_env_keysource,
         pkcs11_module,
@@ -1266,6 +1294,30 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
              deny-list is configured, so NO grant could ever be revoked (silent fail-open); \
              supply --revocation-list <file>, or explicitly accept the no-revocation posture \
              with --allow-empty-revocation"
+                .to_string(),
+        );
+    }
+
+    // ADR-MCPS-013 reference-profile posture: `--authz reference` registers the
+    // reference signed-authorization profile as the SOLE authorization authority.
+    // It is a real, signature-verifying, fully-bound profile (NOT a noop / not
+    // fail-open), but it is explicitly a CONFORMANCE/reference implementation, NOT
+    // the long-term recommendation (Biscuit is the intended first serious external
+    // profile). Refuse to start unless the operator EXPLICITLY acknowledges using
+    // the reference profile as the production authority (`--allow-reference-authz`),
+    // so it can never be silently treated as a production authz authority. This
+    // guard is unconditional (not just under --strict) and mirrors the
+    // `--key-source env` / `--allow-env-keysource` ack pattern; under
+    // strict/production the acknowledged posture is additionally a hard violation
+    // (see `strict_violations`).
+    if config.authz == AuthzKind::Reference && !config.allow_reference_authz {
+        return Err(
+            "--authz reference makes the reference signed-authorization profile the SOLE \
+             authorization authority, but it is a conformance/reference profile, NOT the \
+             long-term production recommendation (ADR-MCPS-013; Biscuit is the intended \
+             first serious external profile). Explicitly acknowledge running it as the \
+             production authority with --allow-reference-authz (and prefer landing a \
+             production profile)"
                 .to_string(),
         );
     }
@@ -1471,6 +1523,21 @@ pub fn strict_violations(config: &Config) -> Vec<String> {
             "--allow-empty-revocation runs --authz reference with no revocation deny-list, \
              so a leaked-but-unexpired authorization grant can never be revoked (fail-open); \
              production must supply --revocation-list <file>"
+                .to_string(),
+        );
+    }
+    // ADR-MCPS-013: `--authz reference` makes the reference (conformance) profile the
+    // sole authorization authority. It is explicitly NOT the long-term production
+    // recommendation, so strict/production refuses it — mirroring the env-keysource
+    // refusal. The non-strict ack (`--allow-reference-authz`) is required to reach
+    // here at all (parse-time guard), but in production even the acknowledged posture
+    // is rejected: land a production profile (Biscuit) instead.
+    if config.authz == AuthzKind::Reference {
+        violations.push(
+            "--authz reference makes the reference/conformance signed-authorization profile \
+             the SOLE authorization authority; it is NOT the long-term production \
+             recommendation (ADR-MCPS-013); production must run a production authorization \
+             profile (Biscuit)"
                 .to_string(),
         );
     }
@@ -4310,7 +4377,15 @@ mod tests {
     #[test]
     fn authz_reference_with_explicit_empty_ack_is_allowed() {
         let mut a = minimal();
-        a.splice(0..0, args(&["--authz", "reference", "--allow-empty-revocation"]));
+        a.splice(
+            0..0,
+            args(&[
+                "--authz",
+                "reference",
+                "--allow-reference-authz",
+                "--allow-empty-revocation",
+            ]),
+        );
         let config = parse_args(&a).expect("parse");
         assert_eq!(config.authz, AuthzKind::Reference);
         assert!(config.allow_empty_revocation);
@@ -4320,7 +4395,16 @@ mod tests {
     #[test]
     fn authz_reference_with_revocation_list_is_allowed() {
         let mut a = minimal();
-        a.splice(0..0, args(&["--authz", "reference", "--revocation-list", "/etc/mcps/revoked"]));
+        a.splice(
+            0..0,
+            args(&[
+                "--authz",
+                "reference",
+                "--allow-reference-authz",
+                "--revocation-list",
+                "/etc/mcps/revoked",
+            ]),
+        );
         let config = parse_args(&a).expect("parse");
         assert_eq!(config.authz, AuthzKind::Reference);
         assert_eq!(config.revocation_list_paths, vec!["/etc/mcps/revoked".to_string()]);
@@ -4330,7 +4414,16 @@ mod tests {
     #[test]
     fn parses_comma_separated_revocation_lists() {
         let mut a = minimal();
-        a.splice(0..0, args(&["--authz", "reference", "--revocation-list", "/a,/b,/c"]));
+        a.splice(
+            0..0,
+            args(&[
+                "--authz",
+                "reference",
+                "--allow-reference-authz",
+                "--revocation-list",
+                "/a,/b,/c",
+            ]),
+        );
         let config = parse_args(&a).expect("parse");
         assert_eq!(
             config.revocation_list_paths,
@@ -4341,8 +4434,81 @@ mod tests {
     #[test]
     fn empty_revocation_list_segment_is_rejected() {
         let mut a = minimal();
-        a.splice(0..0, args(&["--authz", "reference", "--revocation-list", "/a,,/b"]));
+        a.splice(
+            0..0,
+            args(&[
+                "--authz",
+                "reference",
+                "--allow-reference-authz",
+                "--revocation-list",
+                "/a,,/b",
+            ]),
+        );
         assert!(parse_args(&a).unwrap_err().contains("empty path segment"));
+    }
+
+    #[test]
+    fn authz_reference_without_ack_fails_closed() {
+        // ADR-MCPS-013 (audit #94 F1/F2/F4): the reference profile is a real,
+        // signature-verifying profile, but it is a conformance/reference impl, NOT the
+        // production recommendation. Selecting it as the sole authority WITHOUT the
+        // explicit `--allow-reference-authz` ack must be refused at parse time (even
+        // with a revocation list supplied, so it is the ack — not the revocation guard
+        // — being exercised here). Mirrors `--key-source env` / `--allow-env-keysource`.
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&["--authz", "reference", "--revocation-list", "/etc/mcps/revoked"]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(
+            err.contains("--allow-reference-authz") && err.contains("ADR-MCPS-013"),
+            "expected a reference-authz ack error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn authz_reference_with_ack_and_revocation_is_allowed() {
+        // With the explicit ack AND a revocation list, the acknowledged non-production
+        // posture parses (non-strict).
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--authz",
+                "reference",
+                "--allow-reference-authz",
+                "--revocation-list",
+                "/etc/mcps/revoked",
+            ]),
+        );
+        let config = parse_args(&a).expect("parse");
+        assert_eq!(config.authz, AuthzKind::Reference);
+        assert!(config.allow_reference_authz);
+    }
+
+    #[test]
+    fn strict_rejects_reference_authz_even_when_acknowledged() {
+        // ADR-MCPS-013 (audit #94 F1/F2/F4): under --strict/--production even the
+        // acknowledged reference profile is refused — production must run a production
+        // authorization profile (Biscuit). Mirrors the env-keysource strict refusal.
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--strict",
+                "--authz",
+                "reference",
+                "--allow-reference-authz",
+                "--revocation-list",
+                "/etc/mcps/revoked",
+            ]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(
+            err.contains("--authz reference") && err.contains("production"),
+            "strict must reject the reference profile as the production authority, got: {err}"
+        );
     }
 
     #[test]
@@ -4350,7 +4516,13 @@ mod tests {
         let mut a = minimal();
         a.splice(
             0..0,
-            args(&["--strict", "--authz", "reference", "--allow-empty-revocation"]),
+            args(&[
+                "--strict",
+                "--authz",
+                "reference",
+                "--allow-reference-authz",
+                "--allow-empty-revocation",
+            ]),
         );
         let err = parse_args(&a).unwrap_err();
         assert!(

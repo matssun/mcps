@@ -15,6 +15,7 @@ use std::time::UNIX_EPOCH;
 use mcps_policy::InMemoryRevocationSource;
 use mcps_policy::PolicyEvaluator;
 use mcps_policy::ReferenceProfile;
+use mcps_policy::REFERENCE_PROFILE_ID;
 use mcps_proxy::cli;
 use mcps_proxy::cli::AuthzKind;
 use mcps_proxy::cli::BindingKind;
@@ -40,6 +41,14 @@ fn now_unix() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+
+/// A wall-clock reading below this Unix-seconds threshold at startup is treated as a
+/// host-clock fault (audit #94 F5). `now_unix()` clamps a pre-epoch SystemTime error
+/// to 0, and a host whose clock is unset typically reads at/near the epoch; either
+/// way every freshness check will fail closed. The threshold is 2000-01-01 UTC — far
+/// below any plausible real deployment time, so a legitimate clock never trips it,
+/// but a 0/epoch clock always does.
+const EPOCH_CLOCK_FAULT_THRESHOLD_SECS: i64 = 946_684_800;
 
 /// The production [`UnixClock`] the revocation-tier resolver wrapping uses to bound
 /// the propagation window `T` (ADR-MCPS-021). Delegates to the trust-cache's
@@ -85,6 +94,25 @@ fn check_key_file_perms(_path: &str, _strict: bool) -> Result<(), String> {
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config = cli::parse_args(&args)?;
+
+    // Clock-fault diagnosis (audit #94 F5). `now_unix()` deliberately maps a
+    // pre-epoch SystemTime error to 0 (fail CLOSED — every request then fails its
+    // freshness check rather than admitting a stale one), but a clock that reads
+    // at/near the Unix epoch would otherwise surface only as an unexplained flood of
+    // freshness denials. Emit a ONE-TIME loud startup warning so a broken/unset host
+    // clock is diagnosed at the source instead of masked. We do not refuse to start
+    // (the fail-closed posture is already safe), but the operator is told why every
+    // request will be denied.
+    if now_unix() < EPOCH_CLOCK_FAULT_THRESHOLD_SECS {
+        eprintln!(
+            "mcps-proxy: WARNING: the system clock reads at/near the Unix epoch ({} < {}s); this \
+             almost certainly means the host clock is unset or broken. Freshness checks will \
+             FAIL CLOSED (every request denied) until the clock is corrected — fix the host clock \
+             (NTP/RTC) rather than treating the resulting denials as a load problem.",
+            now_unix(),
+            EPOCH_CLOCK_FAULT_THRESHOLD_SECS,
+        );
+    }
 
     // Security posture warnings (config already enforced the hard guards).
     if config.identity_source == IdentityPolicy::CnLegacy {
@@ -392,6 +420,19 @@ fn run() -> Result<(), String> {
     if config.authz == AuthzKind::Reference {
         let mut evaluator = PolicyEvaluator::new();
         evaluator.register(Box::new(ReferenceProfile::new()));
+        // ADR-MCPS-013: surface the ACTIVE authorization profile and its non-production
+        // posture at startup so an operator can never silently treat the reference
+        // (conformance) profile as the production authority. Reaching here required the
+        // explicit `--allow-reference-authz` acknowledgement (parse-time guard) and is
+        // refused under --strict/--production.
+        eprintln!(
+            "mcps-proxy: authorization = ENABLED, active profile '{}' (ACKNOWLEDGED non-production \
+             via --allow-reference-authz). The reference profile is a real, signature-verifying, \
+             fully-bound profile but is a CONFORMANCE/reference implementation, NOT the long-term \
+             recommendation (ADR-MCPS-013; Biscuit is the intended production profile). It is \
+             refused under --strict/--production.",
+            REFERENCE_PROFILE_ID,
+        );
         // ADR-MCPS-013 policy-layer revocation. `parse_args` has already failed
         // closed unless a deny-list was supplied or --allow-empty-revocation was
         // EXPLICITLY given, so reaching here with an empty list is an acknowledged
