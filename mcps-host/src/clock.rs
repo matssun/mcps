@@ -47,7 +47,10 @@ impl Clock for SystemClock {
 /// deterministic demo binaries) in this and dependent crates. It is compiled
 /// only under `cfg(test)` or the explicit `test-fixtures` cargo feature — an
 /// *enforced* boundary, so a default (production) build of `mcps-host` does not
-/// compile it at all and cannot pin a `HostSession` to a frozen clock.
+/// compile or export `FixedClock` at all. That fixture therefore cannot be used
+/// to pin a `HostSession` to a frozen clock unless `test-fixtures` is enabled.
+/// (This scopes only this fixture; a consumer remains free to provide its own
+/// [`Clock`] implementation.)
 #[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug, Clone, Copy)]
 pub struct FixedClock {
