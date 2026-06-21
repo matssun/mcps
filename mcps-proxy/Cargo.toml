@@ -104,6 +104,13 @@ aws_kms_keysource = []
 gcp_kms_keysource = []
 # #4028 Redis-backed shared atomic ReplayCache (horizontal-scale replay safety).
 redis_replay = []
+# #69 (epic #68 v0.4 Axis 1): etcd-backed CP / LINEARIZABLE shared atomic
+# ReplayCache. Blocking HTTPS/HTTP via ureq over etcd's v3 JSON gateway
+# (lease/grant + kv/txn put-if-absent-under-lease) — intentionally NO
+# etcd-client/tonic/tokio (ADR-MCPS-018 lean-sync firewall). Reuses ureq /
+# serde_json / base64, already in the closure; OFF by default, so the default
+# `:mcps_proxy` Bazel target neither sets the flag nor links any new crate.
+cpstore_etcd = []
 # #4030 online OCSP / CRL-distribution-point client-cert revocation.
 # #4063 (MCPS-088, closes #4030): this feature also compiles the full RFC 6960
 # §3.2 responder-SIGNATURE + CertID + responder-id + freshness + nonce trust

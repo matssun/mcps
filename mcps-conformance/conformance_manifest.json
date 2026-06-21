@@ -54,7 +54,7 @@
     "core_vector_files": 21,
     "authorization_vector_cases": 13,
     "total_vectors": 34,
-    "bazel_test_targets": 54
+    "bazel_test_targets": 55
   },
   "bazel_test_targets": [
     "//mcps-conformance:acceptance_test",
@@ -89,6 +89,7 @@
     "//mcps-host:host_test",
     "//mcps-policy:mcps_policy_test",
     "//mcps-policy:vectors_test",
+    "//mcps-proxy:cpstore_etcd_e2e_test",
     "//mcps-proxy:dev_env_key_source_test",
     "//mcps-proxy:fault_injection_test",
     "//mcps-proxy:full_stack_test",

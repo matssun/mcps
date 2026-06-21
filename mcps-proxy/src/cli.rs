@@ -182,9 +182,16 @@ pub struct Config {
     pub replay: ReplayKind,
     /// Replay-cache file path (required when `replay == File`).
     pub replay_path: Option<String>,
-    /// Shared replay-store connection URL (required when `replay == Shared`),
-    /// e.g. `redis://127.0.0.1:6379` (issue #3837).
+    /// Shared replay-store connection URL (required when `replay == Shared` and the
+    /// declared tier is a Redis tier), e.g. `redis://127.0.0.1:6379` (issue #3837).
     pub replay_redis_url: Option<String>,
+    /// CP / linearizable replay-store (etcd v3 JSON gateway) endpoint, e.g.
+    /// `http://127.0.0.1:2379` (issue #69, epic #68 v0.4 Axis 1). REQUIRED when the
+    /// declared durability tier is `LINEARIZABLE`, and meaningless otherwise — a
+    /// dangling value is a hard parse error (fail closed). Selecting `LINEARIZABLE`
+    /// WITHOUT this endpoint is rejected at parse time, never silently downgraded
+    /// to Redis / in-memory (ADR-MCPS-020).
+    pub cpstore_etcd_endpoint: Option<String>,
     /// Declared replay-store durability tier (ADR-MCPS-020). Required when
     /// `replay == Shared` — the tier is an explicit deployment assertion that
     /// determines the horizontal replay-safety claim. `None` for single-node
@@ -359,6 +366,7 @@ const KNOWN_PROXY_FLAGS: &[&str] = &[
     "--replay-cache",
     "--replay-path",
     "--replay-redis-url",
+    "--cpstore-etcd-endpoint",
     "--replay-durability-tier",
     "--transport-binding",
     "--transport-identity-source",
@@ -419,6 +427,8 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut replay = ReplayKind::Memory;
     let mut replay_path = None;
     let mut replay_redis_url = None;
+    // #69 (epic #68 v0.4 Axis 1): the CP/etcd endpoint for the LINEARIZABLE tier.
+    let mut cpstore_etcd_endpoint: Option<String> = None;
     let mut replay_durability_tier: Option<crate::replay_tier::ReplayDurabilityTier> = None;
     let mut binding = BindingKind::Exact;
     let mut identity_source = IdentityPolicy::UriSan;
@@ -635,6 +645,16 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             }
             "--replay-path" => replay_path = Some(value.clone()),
             "--replay-redis-url" => replay_redis_url = Some(value.clone()),
+            // #69: the CP / etcd endpoint for the LINEARIZABLE durability tier.
+            "--cpstore-etcd-endpoint" => {
+                if value.trim().is_empty() {
+                    return Err(
+                        "--cpstore-etcd-endpoint requires a non-empty etcd v3 gateway URL"
+                            .to_string(),
+                    );
+                }
+                cpstore_etcd_endpoint = Some(value.clone());
+            }
             "--replay-durability-tier" => {
                 replay_durability_tier =
                     Some(crate::replay_tier::ReplayDurabilityTier::parse(value)?)
@@ -851,17 +871,53 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     if replay == ReplayKind::File && replay_path.is_none() {
         return Err("--replay-cache file requires --replay-path".to_string());
     }
-    if replay == ReplayKind::Shared && replay_redis_url.is_none() {
-        return Err("--replay-cache shared requires --replay-redis-url".to_string());
-    }
     // ADR-MCPS-020: the durability tier is an explicit deployment assertion that
     // determines the horizontal replay-safety claim, so a shared store MUST
-    // declare it (fail closed rather than assume a tier).
+    // declare it (fail closed rather than assume a tier). Checked BEFORE the
+    // backend-endpoint requirement, because the declared tier decides WHICH
+    // backend endpoint is required.
     if replay == ReplayKind::Shared && replay_durability_tier.is_none() {
         return Err("--replay-cache shared requires --replay-durability-tier \
                     (redis-async | redis-wait-quorum:<quorum>:<timeout_ms> | linearizable | \
                     single-store-fail-closed)"
             .to_string());
+    }
+    // #69 (epic #68 v0.4 Axis 1): the declared tier selects the backend, which
+    // selects the required endpoint. The LINEARIZABLE tier needs a CP / linearizable
+    // store (etcd), so it requires `--cpstore-etcd-endpoint`; every other (Redis)
+    // tier requires `--replay-redis-url`. Selecting LINEARIZABLE WITHOUT the etcd
+    // endpoint is a HARD config-construction error here — NEVER a silent downgrade
+    // to Redis / in-memory (ADR-MCPS-020 fail-closed).
+    let tier_is_linearizable = matches!(
+        replay_durability_tier,
+        Some(crate::replay_tier::ReplayDurabilityTier::Linearizable)
+    );
+    if replay == ReplayKind::Shared {
+        if tier_is_linearizable {
+            if cpstore_etcd_endpoint.is_none() {
+                return Err(
+                    "--replay-durability-tier linearizable requires a CP/linearizable store \
+                     endpoint: --cpstore-etcd-endpoint <http://host:2379> (the LINEARIZABLE \
+                     claim is forbidden without a configured CPStore; it is NEVER silently \
+                     downgraded to Redis or in-memory)"
+                        .to_string(),
+                );
+            }
+        } else if replay_redis_url.is_none() {
+            return Err("--replay-cache shared requires --replay-redis-url".to_string());
+        }
+    }
+    // A `--cpstore-etcd-endpoint` set for any non-LINEARIZABLE configuration would
+    // silently do nothing (a false belief that a CP store is in force), so reject it
+    // (fail closed) — mirrors the dangling `--ocsp-responder-url` / KMS-TLS guards.
+    if cpstore_etcd_endpoint.is_some()
+        && !(replay == ReplayKind::Shared && tier_is_linearizable)
+    {
+        return Err(
+            "--cpstore-etcd-endpoint has no effect without \
+             --replay-cache shared --replay-durability-tier linearizable"
+                .to_string(),
+        );
     }
     // EnvKeySource is dev/CI-only: refuse env key material unless explicitly
     // opted in. Environment variables are visible to the process tree and may
@@ -1060,6 +1116,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         replay,
         replay_path,
         replay_redis_url,
+        cpstore_etcd_endpoint,
         replay_durability_tier,
         binding,
         identity_source,
@@ -1677,8 +1734,72 @@ pub fn build_shared_replay_cache(
     let _ = (replay_redis_url, max_clock_skew, read_timeout, write_timeout, tier);
     Err("shared replay cache backend is not yet available in this build (the Redis \
          adapter is behind the non-default redis_replay feature; the etcd \
-         LINEARIZABLE backend is tracked separately); use --replay-cache file for \
+         LINEARIZABLE backend is behind cpstore_etcd); use --replay-cache file for \
          single-node durability"
+        .to_string())
+}
+
+/// Build the CP / LINEARIZABLE replay cache selected by
+/// `--replay-durability-tier linearizable` (issue #69, epic #68 v0.4 Axis 1),
+/// backed by etcd under the `cpstore_etcd` feature.
+///
+/// Under `--features cpstore_etcd` this constructs a
+/// [`SharedReplayCache`](crate::shared_replay::SharedReplayCache) over an
+/// [`EtcdAtomicReplayStore`](crate::etcd_store::EtcdAtomicReplayStore) against the
+/// etcd v3 JSON gateway at `cpstore_etcd_endpoint`, giving the strongest
+/// horizontal replay-safety claim (conditional on etcd's durable-linearizable
+/// write contract, ADR-MCPS-020). The store opens connections lazily, so an
+/// unreachable etcd surfaces as a fail-closed `Unavailable` on the FIRST replay
+/// op rather than at construction.
+///
+/// `read_timeout` / `write_timeout` are the server's configured socket timeouts;
+/// the larger of the two BOUNDS each blocking etcd op so a stalled backend fails
+/// closed within a finite window instead of wedging the single-threaded serve
+/// loop (the same MCPS-090 / H-10 hazard the Redis path bounds). A disabled
+/// timeout (`0` ⇒ `None`) falls back to a bounded default.
+#[cfg(feature = "cpstore_etcd")]
+pub fn build_cpstore_replay_cache(
+    cpstore_etcd_endpoint: &str,
+    max_clock_skew: i64,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+) -> Result<Box<dyn mcps_core::ReplayCache>, String> {
+    // A disabled socket timeout would re-introduce the hang, so the per-op timeout
+    // is always bounded: prefer the larger configured socket timeout, else a
+    // bounded default.
+    let timeout = match (read_timeout, write_timeout) {
+        (Some(r), Some(w)) => r.max(w),
+        (Some(t), None) | (None, Some(t)) => t,
+        (None, None) => Duration::from_secs(30),
+    };
+    let store = crate::etcd_store::EtcdAtomicReplayStore::connect_with(
+        cpstore_etcd_endpoint,
+        timeout,
+        crate::etcd_store::system_clock(),
+    );
+    Ok(Box::new(crate::shared_replay::SharedReplayCache::new(
+        Box::new(store),
+        max_clock_skew,
+    )))
+}
+
+/// Default-build fail-closed stub for the CP / LINEARIZABLE backend: the etcd
+/// adapter is compiled ONLY under the non-default `cpstore_etcd` feature, so
+/// `--replay-durability-tier linearizable` FAILS CLOSED here in a build without it
+/// (it never silently downgrades to Redis / in-memory). Mirrors the
+/// `build_shared_replay_cache` redis gate. See the feature-enabled variant above.
+#[cfg(not(feature = "cpstore_etcd"))]
+pub fn build_cpstore_replay_cache(
+    cpstore_etcd_endpoint: &str,
+    max_clock_skew: i64,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+) -> Result<Box<dyn mcps_core::ReplayCache>, String> {
+    let _ = (cpstore_etcd_endpoint, max_clock_skew, read_timeout, write_timeout);
+    Err("LINEARIZABLE durability tier needs the cpstore_etcd feature, which is not \
+         available in this build (rebuild with --features cpstore_etcd); the \
+         LINEARIZABLE claim is forbidden without the CP/etcd backend and is NEVER \
+         downgraded to Redis or in-memory"
         .to_string())
 }
 
@@ -3472,8 +3593,14 @@ mod tests {
 
     #[test]
     fn shared_replay_requires_url() {
+        // A Redis tier is declared, so the missing piece is the connection URL.
+        // (With no tier the earlier durability-tier guard fires first; that is
+        // covered by `shared_replay_requires_durability_tier`.)
         let mut a = minimal();
-        a.splice(0..0, args(&["--replay-cache", "shared"]));
+        a.splice(
+            0..0,
+            args(&["--replay-cache", "shared", "--replay-durability-tier", "redis-async"]),
+        );
         let err = parse_args(&a).unwrap_err();
         assert!(err.contains("--replay-redis-url"), "got: {err}");
     }
@@ -3511,6 +3638,109 @@ mod tests {
                 quorum: 2,
                 timeout_ms: 500
             })
+        );
+    }
+
+    // #69 (epic #68 v0.4 Axis 1) — CONFIG fail-closed: selecting the LINEARIZABLE
+    // tier WITHOUT a CP/etcd endpoint is a HARD config-construction error. It must
+    // NEVER silently downgrade to Redis or in-memory. The error names the missing
+    // --cpstore-etcd-endpoint flag.
+    #[test]
+    fn linearizable_tier_without_cpstore_endpoint_fails_closed() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--replay-cache",
+                "shared",
+                "--replay-durability-tier",
+                "linearizable",
+            ]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(
+            err.contains("--cpstore-etcd-endpoint"),
+            "LINEARIZABLE without a CPStore endpoint must fail closed naming the flag; got: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("never") || err.to_lowercase().contains("forbidden"),
+            "the error must state the claim is not silently downgraded; got: {err}"
+        );
+    }
+
+    // #69 — the LINEARIZABLE tier with a CP/etcd endpoint parses, selects the etcd
+    // backend (NOT Redis), and does NOT require --replay-redis-url.
+    #[test]
+    fn linearizable_tier_with_cpstore_endpoint_parses() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--replay-cache",
+                "shared",
+                "--replay-durability-tier",
+                "linearizable",
+                "--cpstore-etcd-endpoint",
+                "http://127.0.0.1:2379",
+            ]),
+        );
+        let config = parse_args(&a).expect("parse");
+        assert_eq!(config.replay, ReplayKind::Shared);
+        assert_eq!(
+            config.replay_durability_tier,
+            Some(crate::replay_tier::ReplayDurabilityTier::Linearizable)
+        );
+        assert_eq!(
+            config.cpstore_etcd_endpoint.as_deref(),
+            Some("http://127.0.0.1:2379")
+        );
+        // The Redis URL is NOT required for the CP tier.
+        assert_eq!(config.replay_redis_url, None);
+    }
+
+    // #69 — a dangling --cpstore-etcd-endpoint for a non-LINEARIZABLE config is
+    // rejected (it would silently do nothing — a false belief a CP store is in
+    // force). Fail closed, mirroring the dangling --ocsp-responder-url guard.
+    #[test]
+    fn cpstore_endpoint_without_linearizable_fails_closed() {
+        let mut a = minimal();
+        a.splice(
+            0..0,
+            args(&[
+                "--replay-cache",
+                "shared",
+                "--replay-redis-url",
+                "redis://127.0.0.1:6379",
+                "--replay-durability-tier",
+                "redis-async",
+                "--cpstore-etcd-endpoint",
+                "http://127.0.0.1:2379",
+            ]),
+        );
+        let err = parse_args(&a).unwrap_err();
+        assert!(
+            err.contains("--cpstore-etcd-endpoint has no effect"),
+            "a dangling CPStore endpoint must fail closed; got: {err}"
+        );
+    }
+
+    // #69 — the CP/LINEARIZABLE builder fails closed in a build WITHOUT the
+    // cpstore_etcd feature: the LINEARIZABLE claim is forbidden without the CP
+    // backend and is never downgraded. Compiled only when the feature is OFF.
+    #[cfg(not(feature = "cpstore_etcd"))]
+    #[test]
+    fn default_build_cpstore_replay_fails_closed() {
+        let err = super::build_cpstore_replay_cache(
+            "http://127.0.0.1:2379",
+            300,
+            Some(std::time::Duration::from_secs(30)),
+            Some(std::time::Duration::from_secs(30)),
+        )
+        .err()
+        .expect("a build without cpstore_etcd must refuse the LINEARIZABLE cache");
+        assert!(
+            err.contains("cpstore_etcd feature"),
+            "expected a clear feature-missing message; got: {err}"
         );
     }
 

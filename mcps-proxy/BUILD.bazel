@@ -52,6 +52,10 @@ _PROXY_LIB_SRCS = [
     # Issue #4028: Redis-backed shared atomic ReplayCache (behind #[cfg(feature =
     # "redis_replay")]; cfg'd out of the default build).
     "src/redis_store.rs",
+    # Issue #69 (epic #68 v0.4 Axis 1): etcd-backed CP / LINEARIZABLE shared atomic
+    # ReplayCache (behind #[cfg(feature = "cpstore_etcd")]; cfg'd out of the default
+    # build).
+    "src/etcd_store.rs",
     # ADR-MCPS-020: declared replay-store durability tier (deployment assertion).
     "src/replay_tier.rs",
     "src/rlimits.rs",
@@ -138,6 +142,8 @@ _PROXY_EXT_DEPS = _PROXY_LIB_DEPS + _PROXY_EXT_CRATES + _PROXY_LINUX_SANDBOX_DEP
 _PROXY_EXT_FEATURES = [
     "pkcs11_keysource",
     "redis_replay",
+    # #69 (epic #68 v0.4 Axis 1): etcd-backed CP / LINEARIZABLE shared replay store.
+    "cpstore_etcd",
     "online_ocsp",
     # ADR-MCPS-028 §B: native AWS KMS Ed25519 response signer.
     "aws_kms_keysource",
@@ -578,6 +584,33 @@ nt_rust_test(
         # MCPS-090: the live PTTL test probes PTTL on the exact key the cache
         # inserted, to confirm the bounded-window TTL (not the now=0 epoch TTL).
         "@crates_mcps//:redis",
+    ],
+)
+
+# #69 (epic #68 v0.4 Axis 1): cross-node replay rejection + bounded lease TTL over
+# a SHARED etcd (the CP / LINEARIZABLE backend). Self-skips (prints + passes)
+# unless MCPS_TEST_ETCD_URL is set, so it is green without a live etcd yet proves
+# multi-node linearizable replay safety when one is provided
+# (Mac: `brew install etcd`, then run with --enable-v2=false v3 gateway on :2379).
+nt_rust_test(
+    name = "cpstore_etcd_e2e_test",
+    srcs = ["tests/cpstore_etcd_e2e_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    crate_features = _PROXY_EXT_FEATURES,
+    edition = "2021",
+    env_inherit = [
+        "MCPS_TEST_ETCD_URL",
+        # CI opt-in: when set, a missing-infra SKIP HARD-FAILS instead of passing.
+        "MCPS_REQUIRE_LIVE_INFRA",
+    ],
+    deps = [
+        ":mcps_proxy_ext",
+        "//mcps-core:mcps_core",
+        "@crates_mcps//:serde_json",
+        # The live TTL probe base64-encodes the key + drives the etcd v3 gateway.
+        "@crates_mcps//:base64",
+        "@crates_mcps//:ureq",
     ],
 )
 

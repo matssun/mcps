@@ -25,6 +25,7 @@ use mcps_proxy::tls;
 use mcps_proxy::transport::ExactMatchBinding;
 use mcps_proxy::DurableReplayCache;
 use mcps_proxy::IdentityPolicy;
+use mcps_proxy::ReplayDurabilityTier;
 use mcps_proxy::IdentityStrategy;
 use mcps_proxy::InnerServer;
 use mcps_proxy::PersistentSubprocessInner;
@@ -293,45 +294,62 @@ fn run() -> Result<(), String> {
         proxy = proxy.with_replay_cache(Box::new(cache));
     }
     if config.replay == ReplayKind::Shared {
-        // Issue #3837: shared, server-side-atomic cache for horizontally-scaled
-        // replay safety. No shared backend ships in this build yet (the Redis
-        // adapter + crate repin + live-backend test are tracked separately), so
-        // this FAILS CLOSED with a clear error rather than degrading to a
-        // non-shared cache.
-        let url = config
-            .replay_redis_url
-            .clone()
-            .ok_or("--replay-cache shared requires --replay-redis-url")?;
-        #[cfg(feature = "redis_replay")]
-        eprintln!(
-            "mcps-proxy: replay cache = shared (horizontally-scaled replay safety; \
-             Redis backend, issue #4028)"
-        );
-        #[cfg(not(feature = "redis_replay"))]
-        eprintln!(
-            "mcps-proxy: replay cache = shared (horizontally-scaled replay safety; \
-             no shared backend is available in this build yet)"
-        );
-        // ADR-MCPS-020: the durability tier is validated present for a shared
-        // store. Surface it + its honest guarantee at startup; the backend label
-        // reflects what is actually compiled in this build.
+        // Issue #3837 / #69: shared, server-side-atomic cache for horizontally-
+        // scaled replay safety. The DECLARED durability tier selects the backend
+        // (ADR-MCPS-020): LINEARIZABLE → the CP / etcd store (issue #69),
+        // every other tier → the Redis store (issue #4028). Either backend FAILS
+        // CLOSED if its adapter feature is not compiled in this build, never
+        // silently degrading to a non-shared / weaker cache.
         let tier = config
             .replay_durability_tier
             .as_ref()
             .ok_or("--replay-cache shared requires --replay-durability-tier")?;
-        let backend = if cfg!(feature = "redis_replay") {
-            "redis"
+        let cache = if matches!(tier, ReplayDurabilityTier::Linearizable) {
+            // CP / LINEARIZABLE: etcd endpoint required (parse_args already
+            // enforced its presence for this tier — fail closed otherwise).
+            let endpoint = config
+                .cpstore_etcd_endpoint
+                .clone()
+                .ok_or("--replay-durability-tier linearizable requires --cpstore-etcd-endpoint")?;
+            let backend = if cfg!(feature = "cpstore_etcd") {
+                "etcd"
+            } else {
+                "none"
+            };
+            eprintln!(
+                "mcps-proxy: replay cache = shared (CP/linearizable; etcd backend, issue #69)"
+            );
+            eprintln!("mcps-proxy: {}", tier.startup_audit_line(backend));
+            cli::build_cpstore_replay_cache(
+                &endpoint,
+                config.max_clock_skew,
+                config.limits.read_timeout,
+                config.limits.write_timeout,
+            )?
         } else {
-            "none"
+            // Redis tiers (REDIS_ASYNC / REDIS_WAIT_QUORUM / SINGLE_STORE_FAIL_CLOSED).
+            let url = config
+                .replay_redis_url
+                .clone()
+                .ok_or("--replay-cache shared requires --replay-redis-url")?;
+            let backend = if cfg!(feature = "redis_replay") {
+                "redis"
+            } else {
+                "none"
+            };
+            eprintln!(
+                "mcps-proxy: replay cache = shared (horizontally-scaled replay safety; \
+                 Redis backend, issue #4028)"
+            );
+            eprintln!("mcps-proxy: {}", tier.startup_audit_line(backend));
+            cli::build_shared_replay_cache(
+                &url,
+                config.max_clock_skew,
+                config.limits.read_timeout,
+                config.limits.write_timeout,
+                tier,
+            )?
         };
-        eprintln!("mcps-proxy: {}", tier.startup_audit_line(backend));
-        let cache = cli::build_shared_replay_cache(
-            &url,
-            config.max_clock_skew,
-            config.limits.read_timeout,
-            config.limits.write_timeout,
-            tier,
-        )?;
         proxy = proxy.with_replay_cache(cache);
     }
     if config.authz == AuthzKind::Reference {

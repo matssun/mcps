@@ -319,7 +319,19 @@ healthy.
 
 ## Open Questions for Review
 
-- Whether a first-class `CPStore` (`LINEARIZABLE`, e.g. etcd) backend ships in
-  v0.3 or is named as the reference for a later point release.
+- ~~Whether a first-class `CPStore` (`LINEARIZABLE`, e.g. etcd) backend ships in
+  v0.3 or is named as the reference for a later point release.~~ **Resolved: YES
+  (issue #69, epic #68 v0.4 Axis 1).** A first-class `CPStore` ships:
+  `EtcdAtomicReplayStore` realizes the `AtomicReplayStore` trait via etcd v3
+  `lease/grant` + `kv/txn` put-if-absent-under-lease (`compare CREATE == 0`),
+  over the **synchronous** `ureq`/JSON gateway behind the non-default
+  `cpstore_etcd` cargo feature (ADR-MCPS-018 lean-sync firewall — no
+  `etcd-client`/tonic/tokio). The `LINEARIZABLE` tier is wired to **require** the
+  CP store: `--cpstore-etcd-endpoint` is mandatory for the tier and a missing
+  endpoint (or a build without `cpstore_etcd`) is a hard config-construction error
+  that **fails closed**, never a silent downgrade to Redis/in-memory. The lease
+  TTL is the bounded `retain_until − now` window (the store reads its own clock,
+  ignoring the trait's vestigial `now = 0`), so the MCPS-090 unbounded-TTL hazard
+  does not apply.
 - Whether the proxy should refuse to start in a strict/production mode unless the
   declared tier is `REDIS_WAIT_QUORUM` or stronger.

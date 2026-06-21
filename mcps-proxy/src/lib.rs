@@ -86,6 +86,12 @@ pub mod pkcs11_keysource;
 #[cfg(feature = "pkcs11_keysource")]
 pub mod pkcs11_native;
 pub mod proxy;
+// Issue #69 (epic #68 v0.4 Axis 1): the etcd-backed CP / LINEARIZABLE shared
+// replay backend that makes `--replay-durability-tier linearizable` declarable
+// with a real durable-linearizable store (ADR-MCPS-020). Compiled ONLY under the
+// non-default `cpstore_etcd` feature so the default build is unchanged.
+#[cfg(feature = "cpstore_etcd")]
+pub mod etcd_store;
 // Issue #4028: the Redis-backed shared replay backend that makes
 // `--replay-cache shared` give real horizontally-scaled replay safety. Compiled
 // ONLY under the non-default `redis_replay` feature so the default build is
@@ -171,6 +177,8 @@ pub use pkcs11_keysource::Pkcs11KeySource;
 pub use proxy::InnerServer;
 pub use proxy::Proxy;
 // Issue #4028: the Redis shared replay backend (feature-gated).
+#[cfg(feature = "cpstore_etcd")]
+pub use etcd_store::EtcdAtomicReplayStore;
 #[cfg(feature = "redis_replay")]
 pub use redis_store::RedisAtomicReplayStore;
 pub use replay_tier::ReplayDurabilityTier;
