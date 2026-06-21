@@ -4,16 +4,24 @@
 
 ## Status
 
-Proposed (v0.4 — 2026-06-21). **DESIGN ONLY — NOT YET IMPLEMENTED.** No code in
-this PR; implementation is tracked by issue #118 and MUST NOT land until this ADR
-is signed off. The `ManifestVerifier` / `ManifestPinStore` / `RevocationSource`
-subsystem (issue #3866, the deferred-by-ADR-MCPS-017 follow-up) is implemented and unit-tested in
-`mcps-policy`, but is **not wired into any production dispatch path** and has no
-durable pin store. This ADR is the deferred follow-up that ADR-MCPS-017 names:
-*"signed tool manifests … each requiring its own ADR / threat model."* It decides
-the interception point, operator config surface, durable pin-store design, and —
-the load-bearing security-policy decision — the **fail-closed** response to a
-manifest verification failure / rug pull.
+**Superseded by [ADR-MCPS-030](adr-mcps-030.md) (2026-06-21).** This ADR proposed
+making the proxy parse `tools/list` and enforce signed tool manifests on the
+dispatch path. On review, that crosses MCP-S Core from message security into MCP
+tool-catalog governance — a separate, actively-evolving MCP domain. ADR-MCPS-030
+keeps MCP-S Core method-transparent and relocates tool-catalog integrity to a
+separate MCP extension (`mcp-tool-catalog-integrity`). **This design was never
+implemented**, and the `ManifestVerifier` / `ManifestPinStore` subsystem it
+referenced has been removed from `mcps-policy`. The text below is retained as the
+historical record of the rejected approach.
+
+_Original status — Proposed (v0.4 — 2026-06-21), DESIGN ONLY, NOT YET IMPLEMENTED;
+implementation was tracked by issue #118. The `ManifestVerifier` / `ManifestPinStore`
+/ `RevocationSource` subsystem (issue #3866) was implemented and unit-tested in
+`mcps-policy` but never wired into any production dispatch path. This ADR was the
+deferred follow-up that ADR-MCPS-017 named (*"signed tool manifests … each
+requiring its own ADR / threat model"*); it decided the interception point,
+operator config surface, durable pin-store design, and the fail-closed response to
+a manifest verification failure / rug pull._
 
 ## Context
 

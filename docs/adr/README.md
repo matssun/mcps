@@ -41,7 +41,8 @@ maintainable as the project evolves.
 | [ADR-MCPS-026](adr-mcps-026.md) | Signing Scope Versus Stateless Per-Request `_meta` (SEP-2575) — v0.3 RC delta |
 | [ADR-MCPS-027](adr-mcps-027.md) | Extension Identifier Reassignment to `se.syncom/mcps` (supersedes ADR-MCPS-010 identifier) |
 | [ADR-MCPS-028](adr-mcps-028.md) | Native Cloud-KMS Response Signers — AWS KMS and GCP Cloud KMS (Ed25519, non-exporting) |
-| [ADR-MCPS-029](adr-mcps-029.md) | Wire Signed-Manifest Enforcement into the Proxy Dispatch Path (design for #118) |
+| [ADR-MCPS-029](adr-mcps-029.md) | Wire Signed-Manifest Enforcement into the Proxy Dispatch Path (superseded by ADR-MCPS-030) |
+| [ADR-MCPS-030](adr-mcps-030.md) | MCP-S Core Is Method-Transparent — Tool Catalog Integrity Is Excluded (supersedes ADR-MCPS-029) |
 
 ## Provenance
 
