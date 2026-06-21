@@ -47,6 +47,13 @@ pub const RECOMMENDED_MAX_T_SECS: i64 = 300;
 /// The deployment-wide default trust-propagation window (seconds), ADR-MCPS-021.
 pub const DEFAULT_T_SECS: i64 = 60;
 
+/// The default short negative TTL (seconds) for `NotFound` / `MalformedKey`
+/// outcomes, so a freshly published rotation key is not suppressed for the full
+/// window `T` (an availability hazard, not a security one). Deliberately small and
+/// `<= DEFAULT_T_SECS`; used when wiring the Tier-1 bounded cache (and the Tier-3
+/// bounded fallback) from the CLI.
+pub const DEFAULT_NEGATIVE_TTL_SECS: i64 = 5;
+
 /// Whether a configured `T` exceeds the recommended maximum (→ the proxy warns;
 /// strict mode MAY cap). A non-positive `T` (live-check / no caching) never warns.
 pub fn t_exceeds_recommended_max(t_secs: i64) -> bool {
@@ -167,10 +174,22 @@ impl BoundedTrustCache {
         }
     }
 
-    /// Compose the cache key for a `(signer, key_id)` pair (mirrors the core
-    /// resolver's `"signer#key_id"` keying).
+    /// Compose a COLLISION-SAFE cache key for a `(signer, key_id)` pair.
+    ///
+    /// A naive `"{signer}#{key_id}"` join is NOT injective: a `signer` or `key_id`
+    /// containing the `#` delimiter aliases distinct pairs (e.g. `("a#b", "c")` and
+    /// `("a", "b#c")` both compose to `"a#b#c"`). Signer strings are DIDs/URIs that
+    /// legitimately contain `#`, so two different bindings could collide — and now
+    /// that [`evict`](BoundedTrustCache::evict) keys off this for Tier-3
+    /// invalidation, a collision could evict the WRONG entry or fail to evict the
+    /// intended one, and Tier 1/3 could serve the wrong cached key. We length-prefix
+    /// each field (in BYTES) so the encoding is unambiguous regardless of any
+    /// delimiter the fields contain, guaranteeing injectivity. This is the SAME
+    /// hardening as `mcps_core::InMemoryTrustResolver::compose_key` (the #79 fix).
+    /// Every cache op (resolve/cached/store/evict) routes through this one function,
+    /// so fixing it here fixes all sites.
     fn compose_key(signer: &str, key_id: &str) -> String {
-        format!("{signer}#{key_id}")
+        format!("{}:{}|{}:{}", signer.len(), signer, key_id.len(), key_id)
     }
 
     /// Look up a still-live cache entry. Returns the reconstructed result on a hit
@@ -560,6 +579,42 @@ mod tests {
             "after evict the next resolve re-consults the inner store"
         );
         assert_eq!(inner.calls(), 2);
+    }
+
+    #[test]
+    fn compose_key_is_injective_across_delimiter_containing_pairs() {
+        // Regression for the #79 collision class (mirrors mcps-core's
+        // `composite_key_is_injective_across_delimiter_containing_pairs`).
+        // `("a#b", "c")` and `("a", "b#c")` both collapse to `"a#b#c"` under a naive
+        // `#` join. With the length-prefixed encoding they must NOT collide, so an
+        // evict for one pair must not evict the other's cached entry.
+        let inner = Arc::new(ScriptedResolver::new(Ok(key_from(&SEED_A))));
+        let (clock, _now) = controllable_clock(1000);
+        let cache = cache_over(inner.clone(), clock);
+
+        // Prime BOTH colliding-under-`#` pairs (the scripted inner returns the same
+        // active key for either; what matters is that they occupy DISTINCT entries).
+        cache.resolve("a#b", "c").expect("(\"a#b\",\"c\") active cached");
+        cache.resolve("a", "b#c").expect("(\"a\",\"b#c\") active cached");
+        assert_eq!(inner.calls(), 2, "two distinct pairs → two distinct misses");
+
+        // Evicting one pair must report success and NOT touch the other.
+        assert!(cache.evict("a#b", "c"), "the first pair's entry is present");
+        // The other pair is still cached: a second resolve is a hit (no re-consult).
+        cache.resolve("a", "b#c").expect("the other pair is still cached");
+        assert_eq!(
+            inner.calls(),
+            2,
+            "evicting (\"a#b\",\"c\") must NOT evict (\"a\",\"b#c\")"
+        );
+        // And the evicted pair really was dropped: it re-consults the inner store.
+        inner.set(Err(TrustResolverError::Revoked));
+        assert_eq!(
+            cache.resolve("a#b", "c").unwrap_err(),
+            TrustResolverError::Revoked,
+            "the evicted pair re-resolves (its entry was actually removed)"
+        );
+        assert_eq!(inner.calls(), 3);
     }
 
     #[test]

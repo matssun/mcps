@@ -29,6 +29,7 @@ use mcps_proxy::IdentityStrategy;
 use mcps_proxy::InnerServer;
 use mcps_proxy::PersistentSubprocessInner;
 use mcps_proxy::Proxy;
+use mcps_proxy::RevocationTier;
 use mcps_proxy::ReverseProxyMtlsProvider;
 use mcps_proxy::ServerOptions;
 
@@ -37,6 +38,13 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// The production [`UnixClock`] the revocation-tier resolver wrapping uses to bound
+/// the propagation window `T` (ADR-MCPS-021). Delegates to the trust-cache's
+/// system clock so production and the unit-tested helper share one clock type.
+fn trust_clock() -> mcps_proxy::trust_cache::UnixClock {
+    mcps_proxy::trust_cache::system_clock()
 }
 
 /// Enforce the key-file-permission posture for a sensitive key file. In the
@@ -160,7 +168,7 @@ fn run() -> Result<(), String> {
     };
     let trust_bytes = std::fs::read(&config.trust_path)
         .map_err(|e| format!("{}: {e}", config.trust_path))?;
-    let resolver = cli::load_trust(&trust_bytes)?;
+    let base_resolver = cli::load_trust(&trust_bytes)?;
 
     // ADR-MCPS-021 Axis 2: surface the DECLARED revocation tier and its honest
     // guarantee at startup. The proxy emits the tier's OWN guarantee string — never
@@ -171,6 +179,25 @@ fn run() -> Result<(), String> {
         "mcps-proxy: {}",
         config.revocation_tier.startup_audit_line("trust-store")
     );
+    // ADR-MCPS-021 Axis 2: APPLY the declared tier to the resolver so the runtime
+    // behavior actually matches the surfaced guarantee (Tier 1 bounds cached active
+    // trust to T; Tier 2 consults the store live every request; Tier 3 evicts on a
+    // pushed event, else falls back to bounded T). Without this wrapping the tier
+    // line above would be a claim the resolver does not enforce.
+    if let RevocationTier::Push { .. } = config.revocation_tier {
+        // Honesty (Tier 3): no networked event source ships yet, so the in-process
+        // reference channel is inert — Tier 3 currently runs at its bounded-`T`
+        // fallback (already reflected in the tier's `guarantee()` string above). It
+        // does NOT operate an active near-zero push channel until a push backend
+        // ships.
+        eprintln!(
+            "mcps-proxy: NOTE: revocation-tier PUSH has no networked event source in this \
+             build, so it runs at its bounded-T fallback (no active near-zero push channel \
+             ships yet); a push backend is a follow-up."
+        );
+    }
+    let resolver =
+        cli::build_revocation_resolver(&config.revocation_tier, Box::new(base_resolver), trust_clock());
 
     // Inner-server environment minimization (MCPS-035, ADR-MCPS-016). By default
     // the child environment is cleared and only the explicit allowlist is passed,
@@ -287,7 +314,7 @@ fn run() -> Result<(), String> {
         key_source,
         config.server_signer.clone(),
         config.server_key_id.clone(),
-        Box::new(resolver),
+        resolver,
         config.audience.clone(),
         config.max_clock_skew,
         inner,
