@@ -55,6 +55,7 @@ use mcps_core::sha256_hash_id;
 use mcps_core::ReplayCache;
 use mcps_core::ReplayCacheError;
 use mcps_core::ReplayDecision;
+use mcps_core::ReplayDurabilityClass;
 
 /// An operational failure of an [`AtomicReplayStore`] (the shared backend could
 /// not be reached or did not answer).
@@ -190,6 +191,16 @@ impl ReplayCache for SharedReplayCache {
         let retain_until = expires_at_unix.saturating_add(self.max_clock_skew_secs);
         Ok(self.store.insert_if_absent(&key, retain_until, 0)?)
     }
+
+    /// Durable: admitted nonces live in a SHARED, server-side-atomic store
+    /// (Redis / etcd / …) visible to every verifier instance, so they survive a
+    /// single proxy's restart and prevent cross-node replays (ADR-MCPS-020). The
+    /// strength of the horizontal claim is the configured `ReplayDurabilityTier`;
+    /// this class only certifies that the cache is NOT the volatile single-process
+    /// reference, clearing the strict object-level durability gate (#78).
+    fn durability_class(&self) -> ReplayDurabilityClass {
+        ReplayDurabilityClass::Durable
+    }
 }
 
 /// A REAL, shared in-memory [`AtomicReplayStore`] reference implementation (NOT a
@@ -273,6 +284,7 @@ mod tests {
     use mcps_core::ReplayCache;
     use mcps_core::ReplayCacheError;
     use mcps_core::ReplayDecision;
+    use mcps_core::ReplayDurabilityClass;
 
     const SIGNER: &str = "did:example:host";
     const AUD: &str = "did:example:verifier";
@@ -296,6 +308,18 @@ mod tests {
                 details: "shared backend unreachable".to_string(),
             })
         }
+    }
+
+    #[test]
+    fn declares_durable_class() {
+        // #78 (ADR-MCPS-020): a shared, cross-instance store survives a single
+        // proxy's restart and prevents cross-node replays, so the cache must
+        // self-declare Durable (the horizontal strength is governed separately by
+        // the ReplayDurabilityTier).
+        let store = InMemoryAtomicReplayStore::new();
+        let cache = SharedReplayCache::new(Box::new(store), SKEW);
+        assert_eq!(cache.durability_class(), ReplayDurabilityClass::Durable);
+        assert!(!cache.is_single_process_reference());
     }
 
     #[test]

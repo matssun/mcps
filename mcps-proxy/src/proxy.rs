@@ -173,6 +173,17 @@ impl Proxy {
         self
     }
 
+    /// The self-declared [`ReplayDurabilityClass`] of the replay cache this proxy
+    /// actually holds (issue #78, ADR-MCPS-020). Lets the wiring layer MACHINE-
+    /// CHECK the cache OBJECT — including a caller-injected one — rather than
+    /// inferring durability from the selected `ReplayKind`. A strict/production
+    /// startup rejects a [`ReplayDurabilityClass::SingleProcessReference`] cache,
+    /// closing the gap at the object level (defense in depth beneath the CLI-flag
+    /// rejection of `--replay-cache memory`).
+    pub fn replay_durability_class(&self) -> mcps_core::ReplayDurabilityClass {
+        self.replay.borrow().durability_class()
+    }
+
     /// Enable opt-in Phase 5 policy enforcement (ADR-MCPS-013). After a request
     /// verifies and before it is dispatched, `evaluator` evaluates the
     /// authorization artifact (issuer keys resolved through this proxy's

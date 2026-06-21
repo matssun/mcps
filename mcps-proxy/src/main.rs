@@ -389,6 +389,28 @@ fn run() -> Result<(), String> {
         };
         proxy = proxy.with_replay_cache(cache);
     }
+    // #78 (ADR-MCPS-020), OBJECT-LEVEL defense in depth beneath the CLI-flag gate:
+    // the CLI's strict_violations rejects the `--replay-cache memory` SELECTION,
+    // but the proxy's replay cache is a `Box<dyn ReplayCache>` that can also be
+    // INJECTED (`with_replay_cache`). Assert the cache the proxy actually holds
+    // self-declares a durable posture under strict/production, so a volatile
+    // single-process reference cache can never reach a production verify path even
+    // if it arrived by injection rather than the default selection. mcps-core's
+    // `durability_class()` defaults (fail closed) to the single-process reference,
+    // so an undeclared cache is rejected here too.
+    if config.strict
+        && proxy.replay_durability_class()
+            == mcps_core::ReplayDurabilityClass::SingleProcessReference
+    {
+        return Err(
+            "strict/production: the configured replay cache self-declares the volatile \
+             single-process reference posture (admitted nonces are lost on restart and \
+             invisible to peer verifiers); a durable replay store is required — use \
+             --replay-cache file or --replay-cache shared, or inject a cache that declares \
+             ReplayDurabilityClass::Durable"
+                .into(),
+        );
+    }
     if config.authz == AuthzKind::Reference {
         let mut evaluator = PolicyEvaluator::new();
         evaluator.register(Box::new(ReferenceProfile::new()));

@@ -52,6 +52,7 @@ use std::path::PathBuf;
 use mcps_core::ReplayCache;
 use mcps_core::ReplayCacheError;
 use mcps_core::ReplayDecision;
+use mcps_core::ReplayDurabilityClass;
 use serde_json::json;
 use serde_json::Value;
 
@@ -133,6 +134,15 @@ impl ReplayCache for DurableReplayCache {
         }
         Ok(ReplayDecision::Fresh)
     }
+
+    /// Durable: admitted nonces are fsync-persisted (temp-file + rename + dir
+    /// fsync) and re-read from disk on restart, so a restart does NOT forget them
+    /// (ADR-MCPS-014/020). Single-node — horizontal strength is asserted by the
+    /// proxy's `ReplayDurabilityTier`, not by this class — but durable, so it
+    /// clears the strict object-level durability gate (#78).
+    fn durability_class(&self) -> ReplayDurabilityClass {
+        ReplayDurabilityClass::Durable
+    }
 }
 
 /// Serialize the entries to `path` atomically (temp file + rename).
@@ -211,9 +221,24 @@ mod tests {
     use mcps_core::ReplayCache;
     use mcps_core::ReplayCacheError;
     use mcps_core::ReplayDecision;
+    use mcps_core::ReplayDurabilityClass;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("mcps_replay_{}_{name}", std::process::id()))
+    }
+
+    #[test]
+    fn declares_durable_class() {
+        // #78 (ADR-MCPS-020): the fsync-persisted file-backed cache survives
+        // restart, so it must self-declare Durable — letting the strict
+        // object-level gate accept it where the volatile reference cache is
+        // rejected.
+        let path = tmp("durable_class");
+        let _ = std::fs::remove_file(&path);
+        let cache = DurableReplayCache::open(&path, 300).unwrap();
+        assert_eq!(cache.durability_class(), ReplayDurabilityClass::Durable);
+        assert!(!cache.is_single_process_reference());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

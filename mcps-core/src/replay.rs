@@ -25,10 +25,60 @@
 //! retain-until instant. In a distributed deployment the verifiers MUST share
 //! replay state (a per-node in-memory cache does not prevent cross-node
 //! replays); [`InMemoryReplayCache`] is a single-process reference only.
+//!
+//! ## Self-declared durability — machine-checkable, not just documented
+//!
+//! "Single-process reference only" is no longer prose alone: every
+//! [`ReplayCache`] self-declares a [`ReplayDurabilityClass`] via
+//! [`ReplayCache::durability_class`], defaulting (fail closed) to
+//! [`ReplayDurabilityClass::SingleProcessReference`]. [`InMemoryReplayCache`]
+//! honestly reports the single-process class, so the wiring layer can MACHINE-
+//! CHECK the cache object it actually holds and refuse to run the volatile
+//! reference cache on a production verify path — rather than relying on the
+//! operator picking the right backend. This is a PURE, type-level capability;
+//! `mcps-core` adds no clock, I/O, or networking (ADR-MCPS-011/012). Cross-node
+//! strength beyond mere durability is still asserted by the proxy's
+//! `ReplayDurabilityTier` (ADR-MCPS-020).
 
 use std::collections::BTreeMap;
 
 use crate::error::McpsError;
+
+/// A [`ReplayCache`]'s self-declared durability posture (ADR-MCPS-020).
+///
+/// This is a PURE, type-level capability: `mcps-core` carries no clock, no I/O,
+/// and no networking (ADR-MCPS-011/012), so this enum says nothing about *how* a
+/// cache is durable — only whether the implementation asserts it survives the
+/// volatility that makes the single-process reference cache unsafe in production.
+///
+/// It exists so the wiring layer can MACHINE-CHECK the cache it actually holds,
+/// rather than inferring durability from which constructor the operator happened
+/// to pick. The default ([`ReplayCache::durability_class`] returns
+/// [`ReplayDurabilityClass::SingleProcessReference`]) is the conservative one: a
+/// cache that does not explicitly declare itself durable is treated as the
+/// non-durable reference, so an unknown or forgetful implementation can never
+/// silently masquerade as a production replay store (fail closed).
+///
+/// `Durable` is a NECESSARY, not sufficient, condition for a production
+/// horizontal deployment: cross-node strength is asserted separately by the
+/// proxy's `ReplayDurabilityTier` (ADR-MCPS-020). A cache may be `Durable`
+/// (survives restart) yet single-node; the tier check governs the horizontal
+/// claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayDurabilityClass {
+    /// The cache keeps admitted `(signer, audience, nonce)` triples only in
+    /// process memory. A process restart forgets every admitted nonce and a
+    /// per-node instance is invisible to its peers — so it neither survives
+    /// restart nor prevents cross-node replays. This is the
+    /// [`InMemoryReplayCache`] reference posture: correct for tests, conformance
+    /// vectors, and single-node dev, but NOT a production replay store.
+    SingleProcessReference,
+    /// The implementation asserts its admitted nonces outlive the process (a
+    /// durable single-node store) and/or are shared across verifier instances.
+    /// This is the minimum class a strict/production wiring layer accepts before
+    /// it then applies the horizontal `ReplayDurabilityTier` check.
+    Durable,
+}
 
 /// The outcome of a replay-cache lookup-and-insert.
 ///
@@ -98,6 +148,29 @@ pub trait ReplayCache {
         nonce: &str,
         expires_at_unix: i64,
     ) -> Result<ReplayDecision, ReplayCacheError>;
+
+    /// This cache's self-declared durability posture (ADR-MCPS-020).
+    ///
+    /// The wiring layer machine-checks THIS — the durability of the cache object
+    /// it actually holds — instead of inferring production-readiness from which
+    /// constructor was selected. The default is the conservative
+    /// [`ReplayDurabilityClass::SingleProcessReference`]: a cache that does not
+    /// explicitly override this is treated as non-durable, so a new or forgetful
+    /// implementation can never silently pass a strict/production durability gate
+    /// (fail closed). A durable implementation MUST override this to honestly
+    /// return [`ReplayDurabilityClass::Durable`].
+    fn durability_class(&self) -> ReplayDurabilityClass {
+        ReplayDurabilityClass::SingleProcessReference
+    }
+
+    /// Whether this cache is the single-process, volatile reference posture
+    /// ([`ReplayDurabilityClass::SingleProcessReference`]) — `true` for
+    /// [`InMemoryReplayCache`] and for any implementation that has not declared
+    /// itself durable. A strict/production wiring layer rejects a cache for which
+    /// this is `true`.
+    fn is_single_process_reference(&self) -> bool {
+        self.durability_class() == ReplayDurabilityClass::SingleProcessReference
+    }
 }
 
 /// Deterministic, [`BTreeMap`]-backed reference [`ReplayCache`] for tests and
@@ -161,6 +234,16 @@ impl ReplayCache for InMemoryReplayCache {
         self.seen.insert(key, retain_until);
         Ok(ReplayDecision::Fresh)
     }
+
+    /// Honestly declares the single-process reference posture. Admitted nonces
+    /// live only in this process's `BTreeMap`: a restart forgets them and a
+    /// per-node instance is invisible to peers, so this cache neither survives
+    /// restart nor prevents cross-node replays (ADR-MCPS-020). Declared
+    /// explicitly (not left to the trait default) so the honesty is local to the
+    /// reference impl and cannot drift if the default ever changes.
+    fn durability_class(&self) -> ReplayDurabilityClass {
+        ReplayDurabilityClass::SingleProcessReference
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +252,7 @@ mod tests {
     use super::ReplayCache;
     use super::ReplayCacheError;
     use super::ReplayDecision;
+    use super::ReplayDurabilityClass;
     use crate::error::McpsError;
 
     const SIGNER: &str = "did:example:host";
@@ -277,6 +361,36 @@ mod tests {
             let nonce = format!("nonce-{i:022}");
             assert!(cache.check_and_insert(SIGNER, AUD, &nonce, EXPIRES).is_ok());
         }
+    }
+
+    #[test]
+    fn in_memory_reference_declares_single_process_non_durable() {
+        // ADR-MCPS-020 (#78): the reference cache must honestly self-declare the
+        // single-process, volatile posture so a strict/production wiring layer can
+        // machine-check the cache OBJECT it holds, rather than trusting the
+        // operator to pick the right backend. A regression here (declaring itself
+        // Durable) would silently re-open the cross-node / restart replay window
+        // this marker exists to gate.
+        let cache = InMemoryReplayCache::new(SKEW);
+        assert_eq!(
+            cache.durability_class(),
+            ReplayDurabilityClass::SingleProcessReference
+        );
+        assert!(cache.is_single_process_reference());
+    }
+
+    #[test]
+    fn durability_class_defaults_to_single_process_reference() {
+        // A cache that implements ONLY check_and_insert (forgetting to declare a
+        // durability posture) must be treated as the non-durable reference, NOT as
+        // durable — fail closed. AlwaysUnavailableReplayCache exercises exactly the
+        // default-only path.
+        let cache = AlwaysUnavailableReplayCache;
+        assert_eq!(
+            cache.durability_class(),
+            ReplayDurabilityClass::SingleProcessReference
+        );
+        assert!(cache.is_single_process_reference());
     }
 
     #[test]
