@@ -20,6 +20,8 @@
 //! cargo feature, so a default build is byte-for-byte unchanged and gains zero
 //! dependencies.
 
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -48,6 +50,92 @@ const DEFAULT_REDIS_TIMEOUT: Duration = Duration::from_secs(30);
 /// path, so the watchdog deadline = `connect_timeout + HANDSHAKE_GRACE`). Kept
 /// short so a silent backend still fails closed promptly.
 const HANDSHAKE_GRACE: Duration = Duration::from_secs(5);
+
+/// Hard ceiling on how many connect/handshake watchdog threads may be
+/// concurrently in flight (running OR abandoned-but-still-blocked) across the
+/// whole process.
+///
+/// ## Why a ceiling is the fix here, not a socket-level handshake deadline
+///
+/// The textbook root-cause fix would be to apply a socket read/write deadline
+/// to the RESP handshake ITSELF (set `SO_RCVTIMEO`/`SO_SNDTIMEO` on the raw
+/// `TcpStream` BEFORE the handshake) so an overrunning worker unblocks and
+/// releases its fd. redis-rs 0.27's BLOCKING path does NOT expose that seam:
+/// [`redis::Client::get_connection_with_timeout`] bounds only the TCP connect,
+/// then `connect()` immediately runs `setup_connection` (the
+/// `CLIENT SETINFO` / RESP3-`HELLO` / `AUTH` / `SELECT` pipeline — non-empty
+/// even for a vanilla `redis://host:port`, since `CLIENT SETINFO` is always
+/// added) and READS the replies with no socket read timeout set. There is no
+/// public API to inject a pre-timed `TcpStream`, and no public
+/// `Connection`-from-stream constructor, so the handshake read genuinely cannot
+/// be bounded in-band without reimplementing the RESP protocol. The watchdog in
+/// [`bounded_connect`] therefore cannot truly unblock such a worker; it can only
+/// stop WAITING on it (fail closed) and let it dangle.
+///
+/// Against a persistently sinkholed/half-open backend each abandoned worker
+/// strands one thread + one socket fd ~forever, so sustained traffic would
+/// accumulate them — a slow resource-exhaustion DoS on the proxy host. This
+/// counting semaphore is the belt-and-suspenders ceiling the audit authorises:
+/// it CAPS the number of simultaneously-stranded connect threads to a constant.
+/// Once that many are outstanding, further connects fail closed
+/// ([`ReplayStoreError::Unavailable`]) immediately instead of spawning yet
+/// another doomed thread, so the leak is bounded by a constant, not by request
+/// rate. M19 already bounds reconnects to one per request, so in practice the
+/// permit is released the instant a healthy backend answers and the ceiling is
+/// never approached.
+const MAX_INFLIGHT_CONNECTS: usize = 64;
+
+/// Count of connect/handshake watchdog threads currently holding a permit
+/// (in flight OR abandoned). A permit is acquired BEFORE the worker is spawned
+/// and released by the worker itself when it finishes — including LATE, after
+/// the deadline abandoned it — so a permit held by a stranded worker is returned
+/// if/when that worker's doomed read ever errors out, and is held for the
+/// lifetime of a truly-wedged one. This is the live count the
+/// [`MAX_INFLIGHT_CONNECTS`] ceiling bounds.
+static INFLIGHT_CONNECTS: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII permit for one in-flight connect watchdog thread. Acquiring increments
+/// [`INFLIGHT_CONNECTS`] and fails closed if that would exceed
+/// [`MAX_INFLIGHT_CONNECTS`]; dropping decrements it. The permit is MOVED into
+/// the watchdog worker so the slot is reclaimed exactly when the worker thread
+/// terminates (in time OR late), which is the moment its socket fd is released.
+struct ConnectPermit;
+
+impl ConnectPermit {
+    /// Acquire a permit, or fail closed if the abandoned-thread ceiling is
+    /// already saturated. Uses a CAS loop so the check-and-increment is atomic
+    /// (no TOCTOU between concurrent connects that could push the live count past
+    /// the ceiling).
+    fn acquire() -> Result<Self, ReplayStoreError> {
+        let mut current = INFLIGHT_CONNECTS.load(Ordering::Acquire);
+        loop {
+            if current >= MAX_INFLIGHT_CONNECTS {
+                return Err(ReplayStoreError::Unavailable {
+                    details: format!(
+                        "redis connect refused: {MAX_INFLIGHT_CONNECTS} connect/handshake \
+                         threads already in flight (backend likely half-open; failing closed \
+                         to bound stranded-thread/fd accumulation rather than spawn another)"
+                    ),
+                });
+            }
+            match INFLIGHT_CONNECTS.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(ConnectPermit),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+impl Drop for ConnectPermit {
+    fn drop(&mut self) {
+        INFLIGHT_CONNECTS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// The production [`UnixClock`]: reads the system clock. A clock that predates the
 /// Unix epoch (impossible on a sane host) clamps to 0 rather than panicking.
@@ -232,7 +320,28 @@ fn ttl_ms_via_clock(clock: &UnixClock, expires_at_unix: i64) -> u64 {
 /// (`connect_timeout + HANDSHAKE_GRACE`) and fails closed
 /// ([`ReplayStoreError::Unavailable`]) if it does not finish — the connect must
 /// NOT hang the single-threaded serve loop (H-10/#4065).
+///
+/// ## Bounding the abandoned worker (audit #97, findings 2+3)
+///
+/// When the watchdog deadline elapses we ABANDON the worker rather than join it
+/// (joining would re-introduce the hang). On a persistently half-open backend an
+/// abandoned worker stays blocked in the unbounded handshake read FOREVER,
+/// stranding one thread + one socket fd each time — a slow resource-exhaustion
+/// DoS. redis-rs 0.27's blocking API exposes no seam to put a read deadline on
+/// the handshake socket itself (see [`MAX_INFLIGHT_CONNECTS`]), so we cannot make
+/// the worker actually finish. Instead we CAP the number of concurrently
+/// in-flight/abandoned workers with the [`INFLIGHT_CONNECTS`] counting semaphore:
+/// a permit is acquired BEFORE the worker is spawned and MOVED into it, so the
+/// slot is reclaimed exactly when the worker terminates (the moment its fd is
+/// released). Once [`MAX_INFLIGHT_CONNECTS`] are outstanding, this fails closed
+/// immediately — the stranded-thread/fd count is bounded by that constant rather
+/// than by request rate.
 fn bounded_connect(params: &ConnectParams) -> Result<redis::Connection, ReplayStoreError> {
+    // Fail closed BEFORE spawning if the ceiling of in-flight/abandoned connect
+    // threads is already saturated, so a persistently half-open backend cannot
+    // accumulate unbounded stranded threads + fds.
+    let permit = ConnectPermit::acquire()?;
+
     let connect_deadline = params.connect_timeout.saturating_add(HANDSHAKE_GRACE);
     let connect_url = params.url.clone();
     let connect_timeout = params.connect_timeout;
@@ -241,8 +350,12 @@ fn bounded_connect(params: &ConnectParams) -> Result<redis::Connection, ReplaySt
     let (tx, rx) = std::sync::mpsc::channel();
     // Detached: if it overruns the deadline we abandon it (it is a doomed blocked
     // read on a dead socket; the process owns no shared state it can corrupt)
-    // rather than join it and re-introduce the hang.
+    // rather than join it and re-introduce the hang. The `permit` is MOVED in, so
+    // it is dropped — releasing the in-flight slot — exactly when this worker
+    // thread terminates, whether on time or LATE after abandonment (the instant
+    // its socket fd is also released).
     std::thread::spawn(move || {
+        let _permit = permit;
         let outcome = (|| {
             let c = redis::Client::open(connect_url.as_str()).map_err(|e| {
                 ReplayStoreError::Unavailable {
@@ -266,6 +379,7 @@ fn bounded_connect(params: &ConnectParams) -> Result<redis::Connection, ReplaySt
         })();
         // A receiver that has already timed out is gone; ignore the send error.
         let _ = tx.send(outcome);
+        // `_permit` drops here, returning the slot to the pool.
     });
 
     match rx.recv_timeout(connect_deadline) {
@@ -461,6 +575,22 @@ impl AtomicReplayStore for RedisAtomicReplayStore {
                             }
                         }
                     }
+                    // NX found the key present ⇒ Replay. NOTE (audit #97, finding 1):
+                    // `SET … NX` is NOT idempotent under the M19 reconnect-retry. If a
+                    // FRESH request's first `SET NX` actually LANDED the key on the
+                    // primary but the reply read then failed transiently, the bounded
+                    // reconnect re-runs the SAME `SET NX`, now finds its own just-written
+                    // key, and returns None here ⇒ a fresh request is reported as Replay.
+                    // This is accepted BY DESIGN: it FAILS CLOSED — it can only ever
+                    // REJECT a legitimate request, never ADMIT a replay (the safe
+                    // direction), and it is covered by the documented F4 contract that a
+                    // client treats `mcps.replay_cache_unavailable` as
+                    // retry-with-a-FRESH-nonce (a new nonce ⇒ a new key ⇒ Fresh). We do
+                    // NOT add any compensating path (e.g. read-back / DEL on retry) that
+                    // could turn a real Replay into an Ok; preserving the never-admit-a-
+                    // replay invariant outweighs the rare spurious-reject availability
+                    // cost. (Same non-idempotency reasoning as the WAIT-shortfall Fatal
+                    // path in `classify_fresh_insert_wait`.)
                     Ok(None) => OpAttempt::Done(ReplayDecision::Replay),
                     Err(e) => {
                         let store_error = ReplayStoreError::Unavailable {
@@ -505,11 +635,15 @@ mod tests {
     use super::ttl_ms_via_clock;
     use super::classify_fresh_insert_wait;
     use super::wait_quorum_satisfied;
+    use super::ConnectPermit;
     use super::OpAttempt;
     use super::RedisAtomicReplayStore;
     use super::ReplayDecision;
     use super::ReplayStoreError;
     use super::UnixClock;
+    use super::INFLIGHT_CONNECTS;
+    use super::MAX_INFLIGHT_CONNECTS;
+    use std::sync::atomic::Ordering;
 
     /// PURE, no-Redis proof of the REDIS_WAIT_QUORUM fail-closed boundary
     /// (ADR-MCPS-020): the configured `quorum` is met only when at least that many
@@ -651,6 +785,9 @@ mod tests {
     /// the watchdog is load-bearing.
     #[test]
     fn stalled_redis_fails_closed_within_timeout_not_hang() {
+        // Serialize with the other tests that assert on the shared in-flight
+        // connect count, so this test's stranded worker cannot perturb theirs.
+        let _guard = super::tests_support::connect_count_lock();
         // In-process sinkhole: accept the TCP connection, then never answer.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind sinkhole");
         let addr = listener.local_addr().expect("sinkhole addr");
@@ -843,5 +980,154 @@ mod tests {
             0,
             "a Fatal (non-connection) error must NOT trigger a reconnect"
         );
+    }
+
+    /// Audit #97 (findings 2+3) — DETERMINISTIC proof of the abandoned-connect-thread
+    /// CEILING, no live Redis. redis-rs 0.27's blocking handshake read cannot be
+    /// bounded in-band, so an overrunning connect worker against a half-open backend
+    /// is abandoned and strands one thread+fd; the [`ConnectPermit`] semaphore caps
+    /// how many can be simultaneously stranded. Here we directly drive the permit
+    /// pool — the exact mechanism [`super::bounded_connect`] uses to fail closed
+    /// before spawning yet another doomed thread — and assert: (a) up to
+    /// `MAX_INFLIGHT_CONNECTS` permits are grantable, (b) the next acquire FAILS
+    /// CLOSED with [`ReplayStoreError::Unavailable`] (does NOT spawn/leak), and
+    /// (c) dropping a permit (a worker terminating, releasing its fd) frees exactly
+    /// one slot so the pool recovers. This bounds the leak to a CONSTANT.
+    ///
+    /// Serialized via a process-global lock because `INFLIGHT_CONNECTS` is shared
+    /// process state; other tests that touch the real connect path (the sinkhole
+    /// test) take the same lock so the counts never interleave.
+    #[test]
+    fn abandoned_connect_threads_are_bounded_by_a_ceiling_failing_closed() {
+        let _guard = super::tests_support::connect_count_lock();
+        // A permit STRANDED by a half-open-backend test (its worker never returns)
+        // is a legitimate persistent baseline — the very thing the ceiling bounds —
+        // so measure RELATIVE to whatever is already in flight, not against 0.
+        let baseline = INFLIGHT_CONNECTS.load(Ordering::Acquire);
+        assert!(
+            baseline < MAX_INFLIGHT_CONNECTS,
+            "stranded baseline ({baseline}) must leave headroom under the ceiling"
+        );
+        let grantable = MAX_INFLIGHT_CONNECTS - baseline;
+
+        // Saturate the remaining headroom: every free permit must be grantable.
+        let mut held: Vec<ConnectPermit> = Vec::new();
+        for i in 0..grantable {
+            match ConnectPermit::acquire() {
+                Ok(p) => held.push(p),
+                Err(e) => panic!("permit {i} of {grantable} must be grantable: {e:?}"),
+            }
+        }
+        assert_eq!(INFLIGHT_CONNECTS.load(Ordering::Acquire), MAX_INFLIGHT_CONNECTS);
+
+        // Ceiling reached: the next acquire FAILS CLOSED rather than leaking another
+        // thread+fd.
+        match ConnectPermit::acquire() {
+            Err(ReplayStoreError::Unavailable { details }) => {
+                assert!(
+                    details.contains("already in flight"),
+                    "saturation error must name the ceiling: {details}"
+                );
+            }
+            Ok(_) => panic!("acquiring past the ceiling must fail closed, not leak a thread"),
+        }
+        assert_eq!(
+            INFLIGHT_CONNECTS.load(Ordering::Acquire),
+            MAX_INFLIGHT_CONNECTS,
+            "a refused acquire must NOT have incremented the count"
+        );
+
+        // A worker terminating (permit dropped, fd released) frees exactly one slot.
+        held.pop();
+        assert_eq!(INFLIGHT_CONNECTS.load(Ordering::Acquire), MAX_INFLIGHT_CONNECTS - 1);
+        let reacquired =
+            ConnectPermit::acquire().expect("a freed slot must be re-grantable after a drop");
+        assert_eq!(INFLIGHT_CONNECTS.load(Ordering::Acquire), MAX_INFLIGHT_CONNECTS);
+        drop(reacquired);
+
+        // Release everything WE took; the pool returns to its baseline (no permit
+        // leak in the RAII drop path — only the pre-existing stranded baseline left).
+        drop(held);
+        assert_eq!(
+            INFLIGHT_CONNECTS.load(Ordering::Acquire),
+            baseline,
+            "all permits we acquired must be returned — no leak in the RAII drop path"
+        );
+    }
+
+    /// Audit #97 — the permit is RELEASED when a successful in-time connect's worker
+    /// finishes, so healthy traffic never approaches the ceiling. Drive the real
+    /// [`super::bounded_connect`] against the in-process sinkhole: it abandons the
+    /// worker (deadline elapses) and the permit stays held by the stranded worker —
+    /// but a SUBSEQUENT connect to a DIFFERENT, immediately-refused address shows the
+    /// count is still well under the ceiling (one stranded worker, not unbounded).
+    /// This is the wiring complement to the pure ceiling test above; the residual
+    /// (that a truly-wedged worker's permit is only reclaimed if its read ever
+    /// errors) is bounded precisely by `MAX_INFLIGHT_CONNECTS` per that test.
+    #[test]
+    fn one_stalled_connect_strands_at_most_one_permit() {
+        let _guard = super::tests_support::connect_count_lock();
+        // Measure relative to any baseline stranded by another half-open test.
+        let baseline = INFLIGHT_CONNECTS.load(Ordering::Acquire);
+
+        // Sinkhole: accept TCP, never answer the handshake.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind sinkhole");
+        let addr = listener.local_addr().expect("sinkhole addr");
+        let sinkhole = thread::spawn(move || {
+            while let Ok((sock, _)) = listener.accept() {
+                let mut s = sock;
+                thread::spawn(move || {
+                    let mut buf = [0u8; 64];
+                    let _ = s.read(&mut buf);
+                    loop {
+                        thread::sleep(Duration::from_secs(3600));
+                    }
+                });
+            }
+        });
+
+        let params = super::ConnectParams {
+            url: format!("redis://{addr}"),
+            connect_timeout: Duration::from_millis(200),
+            read_timeout: Some(Duration::from_millis(200)),
+            write_timeout: Some(Duration::from_millis(200)),
+        };
+        // Fails closed within connect_timeout + HANDSHAKE_GRACE, abandoning ONE
+        // worker that now holds exactly ONE permit.
+        let result = super::bounded_connect(&params);
+        assert!(
+            matches!(result, Err(ReplayStoreError::Unavailable { .. })),
+            "a stalled handshake must fail closed"
+        );
+        let stranded = INFLIGHT_CONNECTS.load(Ordering::Acquire);
+        assert!(
+            stranded <= baseline + 1,
+            "a single stalled connect must strand AT MOST one MORE permit \
+             (baseline {baseline}, now {stranded})"
+        );
+
+        drop(sinkhole);
+    }
+}
+
+/// Process-global serialization for tests that read/write the shared
+/// [`INFLIGHT_CONNECTS`] counter, so their assertions on absolute counts cannot
+/// interleave. Outside `#[cfg(test)]`-only code paths this module is inert.
+#[cfg(test)]
+mod tests_support {
+    use std::sync::Mutex;
+    use std::sync::MutexGuard;
+    use std::sync::OnceLock;
+
+    static CONNECT_COUNT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    /// Acquire the shared lock guarding in-flight-connect-count assertions. A
+    /// poisoned lock (a prior test panicked while holding it) is recovered — the
+    /// guarded data is `()`, so there is nothing to be left inconsistent.
+    pub(super) fn connect_count_lock() -> MutexGuard<'static, ()> {
+        CONNECT_COUNT_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
