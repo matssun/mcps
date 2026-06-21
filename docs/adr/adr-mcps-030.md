@@ -91,7 +91,7 @@ lets it be reviewed and adopted on its own terms.
 ## Related
 
 - [ADR-MCPS-029](adr-mcps-029.md) (superseded — the rejected wiring design)
-- [ADR-MCPS-017](adr-mcps-017.md) (deferred-follow-ups list; amended here)
+- [ADR-MCPS-017](adr-mcps-017.md) (deferred-follow-ups list; should be updated per this ADR to remove signed tool manifests)
 - `mcp-tool-catalog-integrity` (the relocated extension; ADR-MTCI-001 mirrors this
   boundary from the other side)
 - Closed against MCP-S: issues #84, #86, #87, #118
