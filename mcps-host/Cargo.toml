@@ -15,6 +15,27 @@ serde_json = { workspace = true }
 # NonceSource. OS CSPRNG wrapper only — no networking/async; transport-free.
 getrandom = { workspace = true }
 
+[features]
+# Audit #81 (MEDIUM): the deterministic test fixtures `SeededNonceSource` (no real
+# entropy) and `FixedClock` (frozen time) are compiled ONLY under `cfg(test)` or
+# this explicit, non-default feature — an ENFORCED boundary so they cannot link
+# into a production binary and let a misconfigured deployment construct a
+# `HostSession` with predictable nonces. Dependent crates that need the fixtures
+# enable `mcps-host/test-fixtures` (as a dev-dependency feature for test-only use,
+# or a normal feature where deterministic demo binaries require them). OFF by
+# default: a plain `mcps-host` build does not expose either type.
+default = []
+test-fixtures = []
+
+# This crate's OWN integration tests (in `tests/`) link the public, NON-test
+# build of the library, where `cfg(test)` is false — so they need the
+# `test-fixtures` feature to see `FixedClock` / `SeededNonceSource`. A crate
+# enables a feature for its own integration/doc tests by depending on itself as a
+# dev-dependency with that feature; this does NOT affect the default library
+# build (the feature stays off for downstream production consumers).
+[dev-dependencies]
+mcps-host = { path = ".", features = ["test-fixtures"] }
+
 [lib]
 name = "mcps_host"
 path = "src/lib.rs"

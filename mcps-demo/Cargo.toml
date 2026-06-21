@@ -12,7 +12,14 @@ description = "MCP-S single-node demo harness: the host-side HostSession demo cl
 # request params — no crate outside the workspace, no async runtime. Transport
 # stays in this crate; mcps-host remains networking-free (ADR-MCPS-015).
 [dependencies]
-mcps-host = { path = "../mcps-host" }
+# The deterministic demo BINARIES (src/bin/demo_positive.rs, demo_negative.rs,
+# demo_mtls_client.rs) and the integration tests use mcps-host's `FixedClock` /
+# `SeededNonceSource` fixtures, compiled only under its `test-fixtures` feature
+# (audit #81). Because the consumers are normal (non-test) bin targets, the
+# feature is enabled on the NORMAL dependency here. mcps-demo is itself the
+# demo/test harness crate (not a production-deployable), so this does not widen
+# any production surface; the demo lib uses only SystemClock/SystemNonceSource.
+mcps-host = { path = "../mcps-host", features = ["test-fixtures"] }
 mcps-core = { path = "../mcps-core" }
 mcps-policy = { path = "../mcps-policy" }
 mcps-proxy = { path = "../mcps-proxy" }

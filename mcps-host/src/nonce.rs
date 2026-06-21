@@ -17,10 +17,29 @@ pub const NONCE_BYTES: usize = 16;
 /// A source of cryptographically opaque nonce bytes.
 ///
 /// Implemented in production by [`SystemNonceSource`] (OS CSPRNG via `getrandom`)
-/// and in tests by [`SeededNonceSource`] (a deterministic byte stream), so the
-/// session's signed output is reproducible under a fixed seed.
+/// and in tests by `SeededNonceSource` (a deterministic byte stream, available
+/// only under `cfg(test)` or the `test-fixtures` feature), so the session's
+/// signed output is reproducible under a fixed seed.
+///
+/// # Fail-closed contract (deliberate, security-critical)
+///
+/// `fill` is intentionally **infallible**: it has no `Result` return and an
+/// implementation MUST NOT report a partial or degraded fill. The nonce is the
+/// MCPS replay-freshness defense (MCPS-09 / MCPS_SPEC §2/§5) — a *predictable*
+/// nonce is strictly worse than no nonce at all, so the only correct response to
+/// an unavailable entropy source is to **fail loud** (panic / abort the signing
+/// path), never to fall back to a weak or fixed value. The production
+/// implementation upholds this by panicking if the OS CSPRNG is unavailable; see
+/// [`SystemNonceSource::fill`]. The input is not attacker-controlled, so this
+/// panic cannot be induced by a remote peer — it fires only on a genuinely
+/// broken host. Keeping the signature infallible makes the no-weak-nonce
+/// property unavoidable for every implementor rather than an opt-in.
 pub trait NonceSource {
     /// Fill `out` with `out.len()` fresh nonce bytes.
+    ///
+    /// Infallible by contract: see the trait-level "Fail-closed contract" note.
+    /// An implementation that cannot produce real entropy MUST fail loud (panic)
+    /// rather than return predictable bytes.
     fn fill(&mut self, out: &mut [u8]);
 }
 
@@ -38,11 +57,17 @@ impl SystemNonceSource {
 
 impl NonceSource for SystemNonceSource {
     fn fill(&mut self, out: &mut [u8]) {
-        // `getrandom` reads OS entropy and only errors when the OS RNG is
-        // genuinely unavailable. A host that cannot draw entropy must not emit a
-        // predictable nonce, so we fail loudly rather than degrade silently. This
-        // is the production default; deterministic tests inject SeededNonceSource
-        // and never reach this path.
+        // DELIBERATE FAIL-CLOSED-BY-PANIC (see the `NonceSource` trait's
+        // "Fail-closed contract"). `getrandom` reads OS entropy and only errors
+        // when the OS CSPRNG is genuinely unavailable — a broken host, not an
+        // attacker-controlled input. A host that cannot draw entropy MUST NOT
+        // emit a predictable nonce (which would silently defeat MCPS replay
+        // freshness), so we panic and abort the signing path rather than degrade.
+        // The `NonceSource::fill` signature is infallible by design to make this
+        // no-weak-nonce property unavoidable; converting it to `Result` was
+        // considered and rejected (it would let a caller paper over the one
+        // failure mode that must never be recovered from). Deterministic tests
+        // inject the seeded source and never reach this path.
         getrandom::getrandom(out).expect("OS CSPRNG (getrandom) must be available to sign requests");
     }
 }
@@ -50,15 +75,21 @@ impl NonceSource for SystemNonceSource {
 /// Deterministic test nonce source: yields the seed bytes as a repeating stream,
 /// advancing per byte so successive nonces differ while remaining reproducible.
 ///
-/// Lives in the library (not behind `cfg(test)`) so it is reusable as an
-/// injectable fixture by integration tests in this and dependent crates. It is a
-/// TEST provider — never use it in production (it has no real entropy).
+/// It is a TEST provider with NO real entropy and must never reach a production
+/// binary. Because it is reused as an injectable fixture by integration tests
+/// (and the deterministic demo binaries) in this and dependent crates, it is
+/// compiled only under `cfg(test)` or the explicit `test-fixtures` cargo feature
+/// — an *enforced* boundary, not a doc-comment one. A default (production) build
+/// of `mcps-host` does not compile this type at all, so a misconfigured
+/// deployment cannot construct a `HostSession` with predictable nonces from it.
+#[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug, Clone)]
 pub struct SeededNonceSource {
     seed: Vec<u8>,
     offset: usize,
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 impl SeededNonceSource {
     /// Construct a deterministic source over a non-empty `seed`.
     ///
@@ -74,6 +105,7 @@ impl SeededNonceSource {
     }
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 impl NonceSource for SeededNonceSource {
     fn fill(&mut self, out: &mut [u8]) {
         for byte in out.iter_mut() {

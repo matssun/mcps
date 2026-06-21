@@ -127,8 +127,11 @@ rcgen = { workspace = true }
 # (the Bazel ocsp test target wires this same crate); a dev-dep so the ocsp unit
 # tests build + run under `cargo test --features online_ocsp`, not only Bazel.
 ed25519-dalek = { workspace = true }
-# The proxy's integration tests drive the host-side signer end to end.
-mcps-host = { path = "../mcps-host" }
+# The proxy's integration tests drive the host-side signer end to end. They use
+# the deterministic `FixedClock` / `SeededNonceSource` fixtures, which mcps-host
+# compiles only under its `test-fixtures` feature (audit #81); enable it here as a
+# DEV-dependency feature so it never reaches the production proxy closure.
+mcps-host = { path = "../mcps-host", features = ["test-fixtures"] }
 # Resolve child-process binary paths under Bazel runfiles OR plain cargo.
 mcps-test-paths = { path = "../mcps-test-paths" }
 

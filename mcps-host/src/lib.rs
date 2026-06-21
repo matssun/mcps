@@ -23,11 +23,17 @@ pub use signer::HostSigner;
 // with injected clock + nonce providers (production defaults + deterministic
 // test providers) and request_hash correlation by JSON-RPC id.
 pub use clock::Clock;
-pub use clock::FixedClock;
 pub use clock::SystemClock;
 pub use nonce::NonceSource;
-pub use nonce::SeededNonceSource;
 pub use nonce::SystemNonceSource;
+// Deterministic TEST fixtures: re-exported ONLY when compiled under `cfg(test)`
+// or the explicit `test-fixtures` feature, so they are absent from the default
+// (production) public surface. A doc comment is not an enforced boundary; this
+// `cfg` is (audit #81 MEDIUM).
+#[cfg(any(test, feature = "test-fixtures"))]
+pub use clock::FixedClock;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub use nonce::SeededNonceSource;
 pub use nonce::NONCE_BYTES;
 pub use pending::PendingRequest;
 pub use session::HostSession;
