@@ -308,7 +308,18 @@ impl OcspChecker {
     /// POST a DER OCSP request to `url` with the mandatory timeout and return the
     /// raw response body bytes. Any HTTP/timeout/transport error is `Err`.
     fn post_request(&self, url: &str, request_der: &[u8]) -> Result<Vec<u8>, OcspError> {
-        let response = ureq::post(url)
+        // SSRF hardening: the responder host is guarded (`aia_responder_url_is_safe`
+        // → `host_is_public`) BEFORE this call, but that guard only inspects the
+        // FIRST URL. `ureq` follows HTTP 3xx redirects by default, so a hostile
+        // responder could `302 Location: http://169.254.169.254/` and the client
+        // would chase the redirect to an internal address that NEVER passed the
+        // guard. A revocation fetch has no legitimate need to chase redirects, so
+        // disable them (`redirects(0)`): a 3xx is then returned as-is, its body is
+        // not a valid OCSP response, and the path fails CLOSED (Unknown → deny under
+        // hard-fail) rather than reaching the redirect target.
+        let agent = ureq::AgentBuilder::new().redirects(0).build();
+        let response = agent
+            .post(url)
             .set("Content-Type", "application/ocsp-request")
             .set("Accept", "application/ocsp-response")
             .timeout(self.timeout)
@@ -408,6 +419,14 @@ pub fn responder_scheme_allowed(url: &str) -> bool {
 /// hostname that is not a literal IP and not `localhost` is permitted at this layer
 /// (the host is reached over the network where the OS resolves it); literal private
 /// IPs and the loopback name — the practical SSRF vectors — are blocked outright.
+///
+/// RESIDUAL LIMITATION (DNS rebinding): this is a URL/host *syntactic and literal-IP*
+/// guard, not a guarantee against a hostile PUBLIC hostname that later RESOLVES to an
+/// internal address at fetch time. Closing that requires pinning and re-validating
+/// the address actually connected to (a custom resolver/connector), which this guard
+/// does not do. The redirect vector — a guarded first URL that `302`s to an internal
+/// address — IS closed: the OCSP fetch disables redirect-following (see
+/// `OcspChecker::post_request`). DNS rebinding is tracked as issue #128.
 pub fn aia_responder_url_is_safe(url: &str) -> bool {
     if !responder_scheme_allowed(url) {
         return false;
@@ -453,13 +472,25 @@ fn extract_url_host(url: &str) -> Option<String> {
     }
 }
 
-/// Whether `host` is safe to fetch from for an attacker-influenced URL: it is NOT a
-/// literal non-public IP and NOT the loopback name `localhost`. A literal IP is
+/// Whether `host` is safe to fetch from for an attacker-influenced URL: it is NOT
+/// syntactically malformed (no empty DNS label / trailing or doubled dot), NOT a
+/// literal non-public IP, and NOT the loopback name `localhost`. A literal IP is
 /// rejected when it is loopback, link-local, private (RFC 1918 / IPv6 ULA),
 /// unspecified, or multicast. A non-literal hostname (other than `localhost`) is
 /// permitted at this layer. Pure (no DNS).
 fn host_is_public(host: &str) -> bool {
     use std::net::IpAddr;
+    // A trailing dot (`169.254.169.254.`), a leading dot, or a doubled dot
+    // (`a..b`) produces an EMPTY DNS label. std's `IpAddr` and the `inet_aton`
+    // canonicalizer below both REJECT such a string, so without this guard it
+    // falls through to the "treat as a real hostname → permit" branch — yet the
+    // OS resolver STRIPS a trailing root dot and resolves `169.254.169.254.` to
+    // the metadata IP, and `127.0.0.1.` to loopback. Reject any host with an
+    // empty label (and the empty host) OUTRIGHT rather than normalizing it: a
+    // syntactically malformed host is never a legitimate public responder.
+    if host.is_empty() || host.split('.').any(str::is_empty) {
+        return false;
+    }
     // The loopback hostname is the most common non-literal SSRF target — block it.
     if host.eq_ignore_ascii_case("localhost") {
         return false;
@@ -1963,6 +1994,109 @@ mod tests {
         assert!(aia_responder_url_is_safe("http://010.010.010.010/"));
         // A real hostname (non-numeric labels) is permitted at this layer.
         assert!(aia_responder_url_is_safe("http://ocsp.example.com/"));
+    }
+
+    /// Stage-2 audit regression: a syntactically malformed host — trailing dot,
+    /// leading dot, doubled dot, or empty — produces an empty DNS label that std's
+    /// `IpAddr`/`inet_aton` parsers reject, so before the empty-label guard it fell
+    /// through to the "treat as hostname → permit" branch. The OS resolver, however,
+    /// STRIPS a trailing root dot, so `169.254.169.254.` / `127.0.0.1.` reach the
+    /// internal address. All such forms must now be blocked. A legitimate trailing-
+    /// dot FQDN is rejected too — an accepted hardening tradeoff for a revocation
+    /// fetcher (responder URLs do not need the root-dot form).
+    #[test]
+    fn aia_guard_blocks_malformed_empty_label_hosts() {
+        for url in [
+            "http://169.254.169.254./latest/meta-data/", // trailing-dot metadata bypass
+            "http://127.0.0.1./",                        // trailing-dot loopback bypass
+            "http://127.0.0.1../",                       // doubled trailing dot
+            "http://.169.254.169.254/",                  // leading dot
+            "http://example..com/",                      // doubled interior dot
+            "http://.../",                               // all-empty labels
+        ] {
+            assert!(
+                !aia_responder_url_is_safe(url),
+                "{url:?} has an empty DNS label and must be blocked (not normalized)"
+            );
+        }
+        // The malformed-host rejection is at the host layer, so it holds for the bare
+        // host too (the guard is what `aia_responder_url_is_safe` calls after host
+        // extraction).
+        assert!(!super::host_is_public("169.254.169.254."));
+        assert!(!super::host_is_public("127.0.0.1."));
+        assert!(!super::host_is_public("a..b"));
+        assert!(!super::host_is_public(""));
+        // A normal hostname (no empty label) still passes the host layer.
+        assert!(super::host_is_public("ocsp.example.com"));
+    }
+
+    /// Stage-2 audit regression: the responder-host SSRF guard only inspects the
+    /// FIRST URL, so a guarded responder that replies `302 Location:
+    /// http://<internal>/` must NOT be chased — `ureq` follows redirects by default,
+    /// which would reach an address that never passed the guard. This drives the real
+    /// fetch (`post_request`) against a local responder that 302s to a SENTINEL
+    /// listener standing in for the internal target, and asserts the sentinel is
+    /// never contacted.
+    #[test]
+    fn ocsp_post_does_not_follow_redirects() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        // The "internal" target the redirect points at. Non-blocking so we can probe
+        // for a connection without hanging the test.
+        let sentinel = TcpListener::bind("127.0.0.1:0").expect("bind sentinel");
+        let sentinel_addr = sentinel.local_addr().expect("sentinel addr");
+        sentinel.set_nonblocking(true).expect("sentinel nonblocking");
+
+        // The guarded responder: accepts one connection, reads the OCSP POST, and
+        // replies with a 302 redirect to the sentinel. `responder_hit` proves the
+        // fetch actually reached the responder, so a clean sentinel cannot be a
+        // false-pass from a failed first request.
+        let responder = TcpListener::bind("127.0.0.1:0").expect("bind responder");
+        let responder_addr = responder.local_addr().expect("responder addr");
+        let responder_hit = Arc::new(AtomicBool::new(false));
+        let redirect_to = format!("http://{sentinel_addr}/");
+        let hit_flag = Arc::clone(&responder_hit);
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = responder.accept() {
+                hit_flag.store(true, Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {redirect_to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let checker = OcspChecker::new(None, false);
+        let url = format!("http://{responder_addr}/ocsp");
+        // The result itself is irrelevant (a 302 carries no valid OCSP body); the
+        // security property is that NO request reaches the sentinel.
+        let _ = checker.post_request(&url, b"dummy-ocsp-request");
+
+        // Wait (bounded) for the responder thread to observe the connection so the test
+        // can't false-pass due to a failed first request.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !responder_hit.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            responder_hit.load(Ordering::SeqCst),
+            "the OCSP fetch never reached the responder — test would false-pass; check the harness"
+        );
+        match sentinel.accept() {
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Correct: redirects disabled, the internal target was never reached.
+            }
+            Ok(_) => panic!(
+                "OCSP fetch FOLLOWED the 302 redirect to the internal sentinel — SSRF redirect bypass"
+            ),
+            Err(e) => panic!("unexpected sentinel accept error: {e}"),
+        }
     }
 
     /// Unit-level proof that the loose parser canonicalizes each encoding to the
