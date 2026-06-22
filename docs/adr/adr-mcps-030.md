@@ -4,11 +4,16 @@
 
 ## Status
 
-Accepted (v0.4 — 2026-06-21). Supersedes [ADR-MCPS-029](adr-mcps-029.md).
+Accepted (v0.4 — 2026-06-21). Records the removal of the former ADR-MCPS-029
+manifest-enforcement design from this repository; that design is **relocated** to
+the `mcp-tool-catalog-integrity` project as ADR-MTCI-002, where tool-catalog
+integrity now lives.
 
 ## Context
 
-ADR-MCPS-029 proposed wiring signed-tool-manifest enforcement into the proxy
+The former ADR-MCPS-029 (removed from this repository; relocated to
+`mcp-tool-catalog-integrity` ADR-MTCI-002) proposed wiring signed-tool-manifest
+enforcement into the proxy
 dispatch path: the proxy would parse `tools/list` results, recompute tool
 descriptor hashes, verify an operator-supplied signed manifest, pin it, and fail
 closed on a rug pull. Implementing it would make the proxy **MCP-method-aware** —
@@ -47,9 +52,11 @@ code and a rejected design.
 4. **Tool catalog integrity is relocated** to a separate, standalone MCP extension
    — `mcp-tool-catalog-integrity` (MTCI) — which depends on no MCP-S crate, is not
    branded as an MCP-S extension, and **composes with** MCP-S without requiring it.
-5. ADR-MCPS-029 is **superseded** and its wiring is **not implemented**. The
-   tracking issues for the relocated work (#84, #86, #87, #118) are closed against
-   MCP-S and continue (redesigned) in the MTCI repository.
+5. The former ADR-MCPS-029 manifest-enforcement design is **removed** from this
+   repository and **relocated** to `mcp-tool-catalog-integrity` (ADR-MTCI-002);
+   its wiring is **not implemented** here. The tracking issues for the relocated
+   work (#84, #86, #87, #118) are closed against MCP-S and continue (redesigned)
+   in the MTCI repository.
 
 This clarifies the relationship to ADR-MCPS-017's deferred-follow-ups list:
 "signed tool manifests" are excluded from MCP-S entirely and live in MTCI.
@@ -90,7 +97,8 @@ lets it be reviewed and adopted on its own terms.
 
 ## Related
 
-- [ADR-MCPS-029](adr-mcps-029.md) (superseded — the rejected wiring design)
+- Former ADR-MCPS-029 (removed from this repository; the manifest-enforcement
+  design relocated to `mcp-tool-catalog-integrity` ADR-MTCI-002)
 - [ADR-MCPS-017](adr-mcps-017.md) (deferred-follow-ups list; should be updated per this ADR to remove signed tool manifests)
 - `mcp-tool-catalog-integrity` (the relocated extension; ADR-MTCI-001 mirrors this
   boundary from the other side)
