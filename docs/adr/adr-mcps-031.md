@@ -4,9 +4,9 @@
 
 ## Status
 
-Proposed (v0.5 — 2026-06-22). Decision resolved with the owner in the v0.5 grill
+Accepted (v0.5 — 2026-06-23, owner HITL sign-off; see security-boundary.md §10; supersedes the prior Proposed status of 2026-06-22). Decision resolved with the owner in the v0.5 grill
 session ([`docs/grilling-seed/mcps-v0.5-seed.md`](../grilling-seed/mcps-v0.5-seed.md));
-pending implementation and the owner HITL sign-off defined in
+ratified, with implementation merged and the owner HITL sign-off recorded as defined in
 [ADR-MCPS-036](adr-mcps-036.md). Umbrella ADR for the 0.5 release framing.
 
 ## Context

@@ -4,7 +4,7 @@
 
 ## Status
 
-Proposed (v0.5 — 2026-06-22). Resolved in the v0.5 grill. This ADR defines the gate
+Accepted (v0.5 — 2026-06-23, owner HITL sign-off; see security-boundary.md §10; supersedes the prior Proposed status of 2026-06-22). Resolved in the v0.5 grill. This ADR defines the gate
 that the other v0.5 ADRs ([031](adr-mcps-031.md)–[035](adr-mcps-035.md)) are checked
 against; it is itself ratified when the owner signs the boundary and claim-matrix
 updates. Derives from PRD [#148](https://github.com/matssun/mcps/discussions/148).

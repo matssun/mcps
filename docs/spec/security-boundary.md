@@ -2,6 +2,8 @@
 
 **Status: SIGNED OFF by the owner — Mats Sundvall, 2026-05-30 (release gate satisfied for the single-node profile). See Section 7.**
 
+**v0.5 proposal-readiness: SIGNED OFF by the owner — Mats Sundvall, 2026-06-23 (mechanical gate #156 green; no wire-envelope change, draft-01 frozen). See Section 10.**
+
 This document is the project's **honesty gate**. It states exactly what MCP-S
 protects and — equally important — what it does **not** protect, so that a
 security reviewer cannot over-trust the system. It is a **merge/release gate**:
@@ -362,3 +364,33 @@ actually makes.
 not a member of `McpsError::wire_code()`, if the success set is not exactly the
 two-item allowlist, or if an `authorization_hash_mismatch` notion reappears as an
 audit reason.
+
+## 10. v0.5 owner sign-off (proposal-readiness)
+
+> **STATUS: SIGNED OFF — Mats Sundvall, 2026-06-23.** MCP-S 0.5 is
+> proposal-readiness over the **frozen draft-01** envelope. This sign-off adds
+> **no new claim** to Sections 1–9 and **no wire-envelope field**; it attests that
+> the 0.5 proposal-facing material is accurate and that the mechanical
+> proposal-readiness gate is green. The dual gate of ADR-MCPS-036 (mechanical +
+> HITL) is satisfied: the mechanical half below is CI-enforced, and this section is
+> the human half.
+
+| Item | Value |
+|---|---|
+| Scope | MCP-S 0.5 proposal-readiness over frozen draft-01 (no wire change) |
+| Boundary + claim matrix | this doc + [`v0.5-claim-matrix.md`](v0.5-claim-matrix.md) (§A capability + §B deployment-tier) |
+| Mechanical gate (#156) | **green on `main`** — traceability spine, method-transparency pair, audit drift guard, forbidden-claim guard all passing |
+| Owner sign-off | **Mats Sundvall — 2026-06-23** (signed; execution delegated to the agent in-session) |
+
+**Mechanical evidence (CI-enforced).** Every §A claim maps to a named green test
+in `security_traceability_manifest.json`
+(`//mcps-conformance:security_traceability_guard_test`); the method-transparency
+behavioral-equivalence test + static drift guard (ADR-MCPS-030/034), the
+audit-vocabulary drift guard (ADR-MCPS-035), and the forbidden-claim guard over
+the proposal-facing docs (ADR-MCPS-036) are all green. Rule: **no
+traceability-mapped green test, no proposal claim.**
+
+**ADR status.** ADR-MCPS-031 … 036 moved **Proposed → Accepted** on 2026-06-23
+with this sign-off. The 0.5 proposal-readiness release gate is satisfied as of
+2026-06-23; any wire-envelope field gap is ejected to a separate `draft-02` ADR
+as post-0.5 work.

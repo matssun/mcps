@@ -4,7 +4,7 @@
 
 ## Status
 
-Proposed (v0.5 — 2026-06-22). Resolved in the v0.5 grill; pending the owner HITL
+Accepted (v0.5 — 2026-06-23, owner HITL sign-off; see security-boundary.md §10; supersedes the prior Proposed status of 2026-06-22). Resolved in the v0.5 grill; ratified by the owner HITL
 sign-off in [ADR-MCPS-036](adr-mcps-036.md). Extends (does not re-decide)
 [ADR-MCPS-030](adr-mcps-030.md). Derives from PRD
 [#148](https://github.com/matssun/mcps/discussions/148).
