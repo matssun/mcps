@@ -243,10 +243,28 @@ impl ReplayCache for SharedReplayCache {
 /// There is no background clock: an entry is a replay until [`prune`](InMemoryAtomicReplayStore::prune)
 /// evicts it (the absolute `retain_until` carried per entry is the eviction
 /// boundary).
-#[derive(Clone, Default)]
+/// Fail-closed ceiling on retained entries in the in-memory reference store
+/// (finding #140). Unlike a durable/cross-process backend (Redis/etcd) this store
+/// has no server-side TTL and no production prune scheduler, so without a cap a
+/// peer streaming distinct fresh nonces grows it without bound. At the ceiling
+/// `insert_if_absent` fails closed (Unavailable) rather than allow or grow
+/// unbounded; an explicit `prune` drains the backlog as entries expire.
+const MAX_ATOMIC_STORE_ENTRIES: usize = 1_000_000;
+
+#[derive(Clone)]
 pub struct InMemoryAtomicReplayStore {
     /// `composite_key -> retain_until` (absolute Unix seconds).
     seen: Arc<Mutex<BTreeMap<String, i64>>>,
+    /// Fail-closed entry ceiling (defaults to [`MAX_ATOMIC_STORE_ENTRIES`]). Held
+    /// as a field so tests can exercise the ceiling cheaply; production always
+    /// uses the default.
+    max_entries: usize,
+}
+
+impl Default for InMemoryAtomicReplayStore {
+    fn default() -> Self {
+        InMemoryAtomicReplayStore::new()
+    }
 }
 
 impl InMemoryAtomicReplayStore {
@@ -254,7 +272,16 @@ impl InMemoryAtomicReplayStore {
     pub fn new() -> Self {
         InMemoryAtomicReplayStore {
             seen: Arc::new(Mutex::new(BTreeMap::new())),
+            max_entries: MAX_ATOMIC_STORE_ENTRIES,
         }
+    }
+
+    /// Test-only: override the fail-closed entry ceiling so the ceiling path can
+    /// be exercised without inserting [`MAX_ATOMIC_STORE_ENTRIES`] entries.
+    #[cfg(test)]
+    fn with_max_entries(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries;
+        self
     }
 
     /// Evict every entry whose `retain_until < now_unix` (an explicit prune; this
@@ -292,6 +319,22 @@ impl AtomicReplayStore for InMemoryAtomicReplayStore {
         })?;
         if map.contains_key(key) {
             return Ok(ReplayDecision::Replay);
+        }
+        // Fail-closed ceiling (finding #140): this reference store has no
+        // server-side TTL and no production prune scheduler (the trait carries no
+        // clock), so without a cap a peer streaming distinct fresh nonces grows
+        // the map without bound. Past the ceiling, refuse with Unavailable
+        // (→ `mcps.replay_cache_unavailable`, fail closed) rather than grow
+        // unbounded — never a silent "allow". An explicit `prune` drains the
+        // backlog as entries expire. (A genuinely durable/cross-process backend —
+        // Redis/etcd — instead self-evicts via a server-side TTL and is exempt.)
+        if map.len() >= self.max_entries {
+            return Err(ReplayStoreError::Unavailable {
+                details: format!(
+                    "in-memory shared replay store at capacity ({} entries); refusing further nonces until expired entries are pruned",
+                    self.max_entries
+                ),
+            });
         }
         // `expires_at_unix` is the already-skew-folded retain-until instant.
         map.insert(key.to_string(), expires_at_unix);
@@ -510,6 +553,39 @@ mod tests {
             cache.check_and_insert(SIGNER, AUD, NONCE, EXPIRES),
             Ok(ReplayDecision::Fresh),
             "past retain-until the nonce is readmitted (it can no longer pass freshness)"
+        );
+    }
+
+    /// Finding #140 fail-closed ceiling: the in-memory reference store has no
+    /// server-side TTL and no production prune scheduler, so a peer streaming
+    /// distinct fresh nonces would grow it without bound. At the ceiling
+    /// `insert_if_absent` must FAIL CLOSED (Unavailable), never admit the entry or
+    /// grow past the cap. A `prune` then drains the backlog and readmits capacity.
+    #[test]
+    fn ceiling_fails_closed_when_full() {
+        let cap = 4;
+        let store = InMemoryAtomicReplayStore::new().with_max_entries(cap);
+        // Fill to capacity (long-lived entries so prune cannot reclaim).
+        for i in 0..cap as i64 {
+            assert_eq!(
+                store.insert_if_absent(&format!("k{i}"), 1_000_000, 0),
+                Ok(ReplayDecision::Fresh)
+            );
+        }
+        // One more distinct key must be refused, not admitted.
+        let err = store
+            .insert_if_absent("overflow", 1_000_000, 0)
+            .expect_err("at capacity the store must fail closed, never grow unbounded");
+        assert!(matches!(err, ReplayStoreError::Unavailable { .. }));
+        assert_eq!(store.len(), cap, "the refused key must NOT have been admitted");
+
+        // Pruning past every entry's retain-until drains the backlog and frees
+        // capacity again (the ceiling is a backstop, not a permanent wedge).
+        store.prune(2_000_000);
+        assert_eq!(store.len(), 0);
+        assert_eq!(
+            store.insert_if_absent("after-drain", 1_000_000, 0),
+            Ok(ReplayDecision::Fresh)
         );
     }
 

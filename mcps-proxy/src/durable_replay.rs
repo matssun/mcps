@@ -33,9 +33,17 @@
 //!
 //! A corrupt or unreadable existing file fails closed at [`open`](DurableReplayCache::open).
 //!
-//! Like the in-memory reference cache there is NO background clock: pruning of
-//! expired entries is explicit ([`prune`](DurableReplayCache::prune)); a present
-//! entry is a replay until pruned.
+//! Like the in-memory reference cache there is NO background clock. Eviction
+//! happens two ways: an explicit [`prune`](DurableReplayCache::prune) (e.g. a
+//! periodic operator/scheduler call), AND an opportunistic, bounded-cadence
+//! prune run inline from [`check_and_insert`](DurableReplayCache::check_and_insert)
+//! so growth is bounded even with no external scheduler (finding #140). The
+//! inline prune derives its clock anchor solely from the in-flight request's
+//! `expires_at_unix` (a conservative under-estimate of "now" that never evicts a
+//! still-live entry). A hard fail-closed ceiling (`MAX_ENTRIES`) caps retained
+//! entries: past it, `check_and_insert` returns
+//! [`ReplayCacheError::Unavailable`] rather than growing unbounded — never a
+//! silent "allow". A present, unexpired entry is still a replay until pruned.
 //!
 //! Concurrency: a single [`DurableReplayCache`] is NOT internally synchronized
 //! (`&mut self` on insert); the proxy serializes access (single-threaded serve
@@ -59,12 +67,43 @@ use serde_json::Value;
 /// The `(signer, audience, nonce)` replay key.
 type Key = (String, String, String);
 
+/// How often (in admitted inserts) `check_and_insert` runs an opportunistic
+/// prune of expired entries.
+///
+/// The `ReplayCache` trait carries no clock, so there is no production prune
+/// scheduler the file cache can be wired into (finding #140 / ledger
+/// `590b3f2977fe8ef3`). Without this, every accepted nonce is retained forever
+/// and each insert rewrites the ENTIRE map to disk — O(n) bytes + two fsyncs per
+/// request, O(n^2) cumulative I/O — so an authentic peer streaming distinct
+/// fresh nonces drives unbounded disk and per-request latency. We instead prune
+/// inline on a bounded cadence, keyed on `retain_until`, so the retained count
+/// (and thus per-insert I/O) is bounded by the freshness window rather than by
+/// total request volume. Pruning every insert would itself be O(n); a small
+/// cadence amortises it while keeping the bound tight.
+const PRUNE_EVERY_N_INSERTS: u64 = 64;
+
+/// Fail-closed ceiling on retained entries. Even with opportunistic pruning a
+/// pathological peer could, within a single freshness window, present more
+/// distinct fresh nonces than memory/disk can hold. Past this ceiling (after a
+/// prune attempt) the cache refuses further inserts with
+/// [`ReplayCacheError::Unavailable`] (→ `mcps.replay_cache_unavailable`, fail
+/// closed) rather than growing without bound — never a silent "allow". The
+/// window drains the backlog as entries expire.
+const MAX_ENTRIES: usize = 1_000_000;
+
 /// A file-backed durable replay cache.
 #[derive(Debug)]
 pub struct DurableReplayCache {
     path: PathBuf,
     max_clock_skew_secs: i64,
     entries: BTreeMap<Key, i64>,
+    /// Count of admitted inserts since open; drives the opportunistic-prune
+    /// cadence (`PRUNE_EVERY_N_INSERTS`).
+    inserts_since_prune: u64,
+    /// Fail-closed ceiling on retained entries (defaults to [`MAX_ENTRIES`]).
+    /// Held as a field so tests can exercise the ceiling cheaply without
+    /// inserting a million entries; production always uses the default.
+    max_entries: usize,
 }
 
 impl DurableReplayCache {
@@ -81,7 +120,17 @@ impl DurableReplayCache {
             path,
             max_clock_skew_secs,
             entries,
+            inserts_since_prune: 0,
+            max_entries: MAX_ENTRIES,
         })
+    }
+
+    /// Test-only: override the fail-closed entry ceiling so the ceiling path can
+    /// be exercised without inserting [`MAX_ENTRIES`] real (fsynced) entries.
+    #[cfg(test)]
+    fn with_max_entries(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries;
+        self
     }
 
     /// Drop every entry whose `retain_until < now_unix` and persist. Call
@@ -123,6 +172,34 @@ impl ReplayCache for DurableReplayCache {
         if self.entries.contains_key(&key) {
             return Ok(ReplayDecision::Replay);
         }
+
+        // Opportunistic, bounded-cadence prune of expired entries (finding #140).
+        // The `ReplayCache` trait carries no clock, so there is no production
+        // prune scheduler to wire into; instead we evict inline so retained count
+        // and per-insert I/O stay bounded by the freshness window rather than
+        // total request volume. The clock anchor is derived ONLY from this
+        // request's own `expires_at_unix` (see `safe_now_floor`): a conservative
+        // under-estimate of "now" that can never evict a still-live entry.
+        self.inserts_since_prune = self.inserts_since_prune.saturating_add(1);
+        if self.inserts_since_prune >= PRUNE_EVERY_N_INSERTS {
+            self.inserts_since_prune = 0;
+            self.entries
+                .retain(|_, &mut retain_until| retain_until >= safe_now_floor(expires_at_unix, self.max_clock_skew_secs));
+        }
+
+        // Fail-closed ceiling: never grow without bound. If, even after the prune
+        // above, admitting this entry would exceed the cap, refuse it as
+        // Unavailable (→ `mcps.replay_cache_unavailable`) rather than allow or
+        // grow unbounded. The freshness window drains the backlog over time.
+        if self.entries.len() >= self.max_entries {
+            return Err(ReplayCacheError::Unavailable {
+                details: format!(
+                    "replay cache at capacity ({} entries); refusing to admit further nonces until expired entries drain",
+                    self.max_entries
+                ),
+            });
+        }
+
         let retain_until = expires_at_unix.saturating_add(self.max_clock_skew_secs);
         self.entries.insert(key.clone(), retain_until);
         if let Err(e) = persist(&self.path, &self.entries) {
@@ -143,6 +220,24 @@ impl ReplayCache for DurableReplayCache {
     fn durability_class(&self) -> ReplayDurabilityClass {
         ReplayDurabilityClass::Durable
     }
+}
+
+/// A conservative under-estimate of the current Unix time derived solely from an
+/// in-flight request's `expires_at_unix`, used as the clock anchor for the
+/// opportunistic prune inside `check_and_insert` (the `ReplayCache` trait carries
+/// no clock).
+///
+/// A request that reaches replay-check has already passed the freshness window,
+/// so `now <= expires_at_unix`. The earliest "now" consistent with this request
+/// is `expires_at_unix - max_clock_skew_secs` (the issuance-relative lower
+/// bound). Pruning at this floor can only evict entries whose `retain_until`
+/// (`= their expires_at + skew`) is below it — i.e. entries already strictly past
+/// their own retain-until at the earliest possible current time — so it NEVER
+/// over-evicts a still-live entry (fail safe). It may under-prune (keep some
+/// already-expired entries when this request is itself near-expired), which only
+/// costs a little memory, never replay safety.
+fn safe_now_floor(expires_at_unix: i64, max_clock_skew_secs: i64) -> i64 {
+    expires_at_unix.saturating_sub(max_clock_skew_secs)
 }
 
 /// Serialize the entries to `path` atomically (temp file + rename).
@@ -439,6 +534,114 @@ mod tests {
             cache.check_and_insert("s", "a", "n", 2000).unwrap(),
             ReplayDecision::Fresh
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Finding #140 regression: with NO explicit `prune()` call, streaming a long
+    /// run of distinct fresh nonces whose `expires_at_unix` advances forward must
+    /// NOT retain every nonce forever — the inline opportunistic prune
+    /// (`check_and_insert`) evicts entries that have fallen past their
+    /// retain-until. Without the inline prune the map grows monotonically and this
+    /// assertion (bounded retained count) fails.
+    #[test]
+    fn streaming_fresh_nonces_prunes_inline_without_explicit_prune() {
+        let path = tmp("inline_prune");
+        let _ = std::fs::remove_file(&path);
+        // skew = 0 so retain_until == expires_at_unix; the safe-now floor equals
+        // the request's own expires_at_unix.
+        let mut cache = DurableReplayCache::open(&path, 0).unwrap();
+
+        // Each nonce expires 1s before the next is presented, so by the time the
+        // cadence-triggered prune runs, every earlier entry is strictly past its
+        // retain-until and must be evicted. We never call prune() explicitly.
+        let runs = (super::PRUNE_EVERY_N_INSERTS * 4) as i64;
+        for i in 0..runs {
+            // expires_at advances by 2 each step; entry i's retain_until = base+2i,
+            // the next request's safe-now floor = base+2(i+1) > base+2i, so prior
+            // entries are expired relative to later requests.
+            let expires_at = 1_000 + 2 * i;
+            assert_eq!(
+                cache
+                    .check_and_insert("s", "a", &format!("n{i}"), expires_at)
+                    .unwrap(),
+                ReplayDecision::Fresh
+            );
+        }
+
+        // Retained count is bounded by the freshness window (here ~one cadence
+        // batch), NOT by total inserts. Without the inline prune this would be
+        // `runs` entries; with it the count stays far below.
+        assert!(
+            cache.len() < super::PRUNE_EVERY_N_INSERTS as usize * 2,
+            "inline prune must bound retained entries (got {}, streamed {})",
+            cache.len(),
+            runs
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The inline prune NEVER evicts a still-live entry: its clock anchor is a
+    /// conservative under-estimate of "now" derived from the in-flight request's
+    /// own `expires_at_unix`. A nonce that is still within its freshness window
+    /// (relative to the requests being streamed) must remain a replay even after
+    /// the cadence-triggered prune runs.
+    #[test]
+    fn inline_prune_never_evicts_a_live_entry() {
+        let path = tmp("inline_prune_safe");
+        let _ = std::fs::remove_file(&path);
+        let mut cache = DurableReplayCache::open(&path, 30).unwrap();
+
+        // A long-lived nonce: expires far in the future relative to the stream.
+        cache.check_and_insert("s", "a", "long", 100_000).unwrap();
+
+        // Stream enough near-now nonces to trigger the cadence prune. Their
+        // expires_at is well below the long-lived entry's retain_until, so the
+        // safe-now floor never reaches it.
+        for i in 0..(super::PRUNE_EVERY_N_INSERTS as i64 + 5) {
+            cache
+                .check_and_insert("s", "a", &format!("n{i}"), 1_000 + i)
+                .unwrap();
+        }
+
+        // The still-live nonce must remain a replay — not evicted by the prune.
+        assert_eq!(
+            cache.check_and_insert("s", "a", "long", 100_000).unwrap(),
+            ReplayDecision::Replay,
+            "a still-live entry must survive the inline opportunistic prune"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Finding #140 fail-closed ceiling: if even after the inline prune the cache
+    /// is at capacity, admitting another distinct fresh nonce must FAIL CLOSED
+    /// (`Unavailable`), never grow unbounded and never silently allow. Here every
+    /// entry is long-lived (high expires_at, skew 0) so the inline prune cannot
+    /// reclaim space, forcing the ceiling.
+    #[test]
+    fn ceiling_fails_closed_when_full_of_live_entries() {
+        let path = tmp("ceiling");
+        let _ = std::fs::remove_file(&path);
+        let cap = 8;
+        let mut cache = DurableReplayCache::open(&path, 0).unwrap().with_max_entries(cap);
+        // Fill to capacity with non-expiring (far-future) nonces.
+        for i in 0..cap as i64 {
+            assert_eq!(
+                cache
+                    .check_and_insert("s", "a", &format!("n{i}"), 1_000_000)
+                    .unwrap(),
+                ReplayDecision::Fresh
+            );
+        }
+        // One more distinct fresh nonce must be refused as Unavailable, not admitted.
+        let err = cache
+            .check_and_insert("s", "a", "overflow", 1_000_000)
+            .unwrap_err();
+        assert!(
+            matches!(err, ReplayCacheError::Unavailable { .. }),
+            "at capacity the cache must fail closed, never grow unbounded or allow"
+        );
+        // It was NOT admitted (no silent growth): still at the cap.
+        assert_eq!(cache.len(), cap);
         let _ = std::fs::remove_file(&path);
     }
 
