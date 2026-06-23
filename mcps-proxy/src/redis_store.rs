@@ -178,17 +178,17 @@ pub fn system_clock() -> UnixClock {
 /// intended `retain_until - now` WINDOW (seconds × 1000), not the absolute Unix
 /// epoch (~1.78e12 ms ≈ 56 years).
 ///
-/// Clamps to a non-negative duration: if the retain-until has already passed, a
-/// minimal 1 ms TTL records the sighting just long enough to answer a same-instant
-/// racing replay, matching the in-memory store retaining the entry at its
-/// retain-until boundary. The seconds→ms multiply saturates so a pathological
-/// retain-until cannot overflow the `PX` argument.
+/// Clamps to a non-negative duration. The seconds→ms multiply saturates so a
+/// pathological retain-until cannot overflow the `PX` argument.
 ///
-/// NOTE: this function is only ever reached for a STRICTLY-POSITIVE remaining
-/// window — [`insert_if_absent`](RedisAtomicReplayStore::insert_if_absent) rejects
-/// a non-positive window pre-store via [`is_nonpositive_ttl`] (MCPS-08), so the
-/// `.max(1)` clamp here is now only the same-instant-race floor for a positive
-/// window that rounds below 1 ms (it never admits an already-stale nonce).
+/// NOTE: in production this function is only ever reached for a STRICTLY-POSITIVE
+/// remaining window — [`insert_if_absent`](RedisAtomicReplayStore::insert_if_absent)
+/// rejects a non-positive window pre-store via [`is_nonpositive_ttl`] (MCPS-08).
+/// Because the remaining window is measured in WHOLE SECONDS, any admitted window
+/// is `>= 1 s`, so the result is `>= 1000 ms`; the trailing `.max(1)` is therefore
+/// an unreachable defensive floor for an admitted nonce. It only takes effect if
+/// this pure function is called directly with a non-positive window (as the unit
+/// test does), and never admits an already-stale nonce into the store.
 pub(crate) fn compute_ttl_ms(expires_at_unix: i64, now_unix: i64) -> u64 {
     let ttl_secs = expires_at_unix.saturating_sub(now_unix).max(0);
     (ttl_secs as u64).saturating_mul(1000).max(1)
@@ -834,11 +834,12 @@ mod tests {
     }
 
     /// `compute_ttl_ms` itself still floors a non-positive raw window to a minimal
-    /// positive TTL (never 0, never negative) — but it is only ever REACHED for a
-    /// strictly-positive window now, because `insert_if_absent` rejects a
-    /// non-positive window pre-store (see `is_nonpositive_ttl` and the regression
-    /// test below). The `.max(1)` floor remains the same-instant-race floor for a
-    /// positive window that rounds below 1 ms.
+    /// positive TTL (never 0, never negative) — exercised here by calling the pure
+    /// function directly. In production it is only ever REACHED for a
+    /// strictly-positive window, because `insert_if_absent` rejects a non-positive
+    /// window pre-store (see `is_nonpositive_ttl` and the regression test below);
+    /// an admitted whole-second window is `>= 1000 ms`, so the `.max(1)` floor is
+    /// an unreachable defensive guard for an admitted nonce.
     #[test]
     fn ttl_ms_clamps_to_minimal_when_already_expired() {
         assert_eq!(compute_ttl_ms(1_000, 1_000), 1, "exactly-now → 1ms");
