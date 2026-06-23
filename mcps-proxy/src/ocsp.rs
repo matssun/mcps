@@ -50,9 +50,12 @@
 //!      `CertID` equals the CertID we requested (hash alg OID, issuer name hash,
 //!      issuer key hash, serial). A response that answers a DIFFERENT cert is not
 //!      evidence about ours. See [`select_matching_single_response`].
-//!   4. **Freshness** — `now >= thisUpdate - skew` and, when present,
-//!      `now <= nextUpdate + skew`; a stale or not-yet-valid response is treated
-//!      as Unknown. See [`is_fresh`].
+//!   4. **Freshness** — `now >= thisUpdate - skew` and `now <= upper + skew`,
+//!      where `upper` is `nextUpdate` when present, capped unconditionally at
+//!      `thisUpdate + max_response_age`. The cap bounds acceptance even when a
+//!      response omits `nextUpdate`, so an old responder-signed Good cannot be
+//!      replayed indefinitely. A stale or not-yet-valid response is treated as
+//!      Unknown. See [`is_fresh`].
 //!   5. **Nonce** — the request carries a 16-byte CSPRNG nonce; when the
 //!      responder echoes a nonce it MUST equal the request's, else the response
 //!      is a replay/substitution and is rejected. See [`nonce_ok`].
@@ -110,6 +113,17 @@ const OCSP_NONCE_LEN: usize = 16;
 /// revocation latency. `thisUpdate` may be up to this far in the future, and
 /// `nextUpdate` up to this far in the past, before the response is rejected.
 const OCSP_FRESHNESS_SKEW: Duration = Duration::from_secs(300);
+
+/// The maximum age a response may have relative to its `thisUpdate`, applied as
+/// an absolute upper bound on acceptance EVEN WHEN `nextUpdate` is absent. RFC
+/// 6960 permits responders to omit `nextUpdate` (and to ignore the request
+/// nonce), which would otherwise let a captured responder-signed `good` be
+/// replayed by an active network attacker indefinitely — keeping a since-revoked
+/// client admitted and defeating the online check's purpose of bounding
+/// revocation latency. Capping acceptance at `thisUpdate + max_response_age (+
+/// skew)` bounds that replay window. One day is comfortably longer than any
+/// well-configured responder's refresh interval while still bounding latency.
+const OCSP_MAX_RESPONSE_AGE: Duration = Duration::from_secs(86_400);
 
 /// The OCSP access-method OID `id-ad-ocsp` (`1.3.6.1.5.5.7.48.1`) used inside the
 /// Authority Information Access (AIA) extension to point at the responder URL.
@@ -781,9 +795,11 @@ pub fn verify_and_map_response(
         .ok_or(OcspError::CertIdMismatch)?;
 
     // (5) freshness of the selected response.
-    if !is_fresh(single, now, OCSP_FRESHNESS_SKEW) {
+    if !is_fresh(single, now, OCSP_FRESHNESS_SKEW, OCSP_MAX_RESPONSE_AGE) {
         return Err(OcspError::NotFresh(
-            "thisUpdate/nextUpdate window does not include now".into(),
+            "response not fresh: now outside [thisUpdate - skew, upper + skew], \
+             where upper = min(nextUpdate, thisUpdate + max_response_age)"
+                .into(),
         ));
     }
 
@@ -1059,9 +1075,17 @@ fn cert_ids_bind(a: &CertId, b: &CertId) -> bool {
 }
 
 /// Whether `single` is fresh at `now` within `skew`: `now >= thisUpdate - skew`
-/// and, when `nextUpdate` is present, `now <= nextUpdate + skew`. A response with
-/// no `nextUpdate` has no asserted expiry, so only the lower bound applies. Pure.
-fn is_fresh(single: &SingleResponse, now: SystemTime, skew: Duration) -> bool {
+/// and `now <= upper + skew`, where `upper` is `nextUpdate` when present, capped
+/// at `thisUpdate + max_age`. A response with no `nextUpdate` therefore still has
+/// an absolute upper bound of `thisUpdate + max_age + skew`, so a captured
+/// responder-signed response cannot be replayed indefinitely even when the
+/// responder omits `nextUpdate` and ignores the nonce. Pure.
+fn is_fresh(
+    single: &SingleResponse,
+    now: SystemTime,
+    skew: Duration,
+    max_age: Duration,
+) -> bool {
     let Some(now_unix) = system_time_to_unix(now) else {
         return false;
     };
@@ -1070,12 +1094,20 @@ fn is_fresh(single: &SingleResponse, now: SystemTime, skew: Duration) -> bool {
     if now_unix.saturating_add(skew) < this_update {
         return false;
     }
-    if let Some(next_update) = &single.next_update {
-        let next = next_update.0.to_unix_duration();
-        // now must be at or before nextUpdate (plus skew).
-        if now_unix > next.saturating_add(skew) {
-            return false;
+    // Absolute cap derived from thisUpdate, applied unconditionally.
+    let age_cap = this_update.saturating_add(max_age);
+    // The effective upper bound is the responder-asserted nextUpdate when present,
+    // but never beyond the absolute age cap. With no nextUpdate, the age cap alone
+    // bounds acceptance — preventing unbounded replay of a no-nextUpdate response.
+    let upper = match &single.next_update {
+        Some(next_update) => {
+            let next = next_update.0.to_unix_duration();
+            next.min(age_cap)
         }
+        None => age_cap,
+    };
+    if now_unix > upper.saturating_add(skew) {
+        return false;
     }
     true
 }
@@ -1368,6 +1400,7 @@ mod tests {
     use super::verify_and_map_response;
     use super::OcspError;
     use super::OCSP_FRESHNESS_SKEW;
+    use super::OCSP_MAX_RESPONSE_AGE;
     use std::time::Duration;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
@@ -1663,13 +1696,16 @@ mod tests {
         });
         let basic = decode_basic(&response);
         let single = &basic.tbs_response_data.responses[0];
-        assert!(is_fresh(single, at(2024, 1, 1), OCSP_FRESHNESS_SKEW), "within window");
         assert!(
-            !is_fresh(single, at(2023, 12, 31), OCSP_FRESHNESS_SKEW),
+            is_fresh(single, at(2024, 1, 1), OCSP_FRESHNESS_SKEW, OCSP_MAX_RESPONSE_AGE),
+            "within window"
+        );
+        assert!(
+            !is_fresh(single, at(2023, 12, 31), OCSP_FRESHNESS_SKEW, OCSP_MAX_RESPONSE_AGE),
             "before thisUpdate (beyond skew) is not fresh"
         );
         assert!(
-            !is_fresh(single, at(2024, 6, 1), OCSP_FRESHNESS_SKEW),
+            !is_fresh(single, at(2024, 6, 1), OCSP_FRESHNESS_SKEW, OCSP_MAX_RESPONSE_AGE),
             "after nextUpdate (beyond skew) is not fresh"
         );
     }
@@ -1688,7 +1724,47 @@ mod tests {
         let single = &basic.tbs_response_data.responses[0];
         // 2 minutes before thisUpdate is within the 5-minute skew.
         let just_before = at(2024, 1, 1) - Duration::from_secs(120);
-        assert!(is_fresh(single, just_before, OCSP_FRESHNESS_SKEW));
+        assert!(is_fresh(single, just_before, OCSP_FRESHNESS_SKEW, OCSP_MAX_RESPONSE_AGE));
+    }
+
+    #[test]
+    fn freshness_capped_when_no_next_update() {
+        // A responder-signed `good` with thisUpdate=Jan1 and NO nextUpdate (RFC
+        // 6960 permits omission). Without an absolute cap, this could be replayed
+        // indefinitely; with the max-age cap it must be rejected once it is older
+        // than thisUpdate + OCSP_MAX_RESPONSE_AGE (+ skew).
+        let (_i, _l, response, _id) = build_fixture(ResponseFixture {
+            status: CertStatus::good(),
+            cert_id: None,
+            this_update: gtime(2024, 1, 1),
+            next_update: None,
+            echo_nonce: None,
+            signature: Vec::new(),
+        });
+        let basic = decode_basic(&response);
+        let single = &basic.tbs_response_data.responses[0];
+
+        // Just after thisUpdate: still within the cap, so fresh.
+        assert!(
+            is_fresh(single, at(2024, 1, 1), OCSP_FRESHNESS_SKEW, OCSP_MAX_RESPONSE_AGE),
+            "no-nextUpdate response at thisUpdate is fresh"
+        );
+
+        // Within the cap (12h after thisUpdate, cap is 24h): still fresh.
+        let within = at(2024, 1, 1) + Duration::from_secs(12 * 3600);
+        assert!(
+            is_fresh(single, within, OCSP_FRESHNESS_SKEW, OCSP_MAX_RESPONSE_AGE),
+            "no-nextUpdate response within max-age cap is fresh"
+        );
+
+        // Beyond thisUpdate + max_age + skew: must be rejected. This is the
+        // regression — before the cap, a no-nextUpdate response was accepted here.
+        let replayed =
+            at(2024, 1, 1) + OCSP_MAX_RESPONSE_AGE + OCSP_FRESHNESS_SKEW + Duration::from_secs(60);
+        assert!(
+            !is_fresh(single, replayed, OCSP_FRESHNESS_SKEW, OCSP_MAX_RESPONSE_AGE),
+            "no-nextUpdate response older than the max-age cap must be rejected (anti-replay)"
+        );
     }
 
     #[test]
