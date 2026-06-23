@@ -174,6 +174,15 @@ impl ReferenceProfile {
         }
 
         // Scope: the requested method/tool/arguments must match a granted op.
+        // Reject an empty grant target FIRST (#133): an empty `tool` can never be
+        // a legitimate scope key, and for any method whose target is not in
+        // `params.name` the extracted target would also collapse to "" — making
+        // an empty-tool grant a silent wildcard over that whole method family.
+        // Failing closed here means no signed grant with a blank target is ever
+        // honored, regardless of method-target keying below.
+        if grant.grants.iter().any(|g| g.tool.is_empty()) {
+            return Err(PolicyError::AuthorizationMalformed);
+        }
         check_scope(&grant, request)?;
 
         Ok(())
@@ -236,14 +245,31 @@ fn check_window(grant: &ReferenceGrant, now_unix: i64) -> Result<(), PolicyError
 }
 
 /// The requested method / tool / arguments must match at least one granted op.
+///
+/// The scope target (`tool`) is keyed PER-METHOD (#133): MCP carries the
+/// per-operation target in different `params` fields depending on the method —
+/// `tools/call` and `prompts/get` name it in `params.name`, `resources/read`
+/// names it in `params.uri`. Deriving the target solely from `params.name`
+/// would let a `resources/read` request collapse its target to "" and (paired
+/// with an empty-tool grant) match every resource. Any method NOT in this
+/// name-keyed allow-set extracts no target and therefore cannot match any grant,
+/// so an unrecognized method fails closed (`tool` stays `None`).
 fn check_scope(grant: &ReferenceGrant, request: &Value) -> Result<(), PolicyError> {
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-    let tool = request
-        .get("params")
-        .and_then(|p| p.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let arguments = request.get("params").and_then(|p| p.get("arguments"));
+    let params = request.get("params");
+    let target_key = match method {
+        "tools/call" | "prompts/get" => Some("name"),
+        "resources/read" => Some("uri"),
+        _ => None,
+    };
+    let tool = target_key.and_then(|key| params.and_then(|p| p.get(key)).and_then(Value::as_str));
+    let arguments = params.and_then(|p| p.get("arguments"));
+
+    // A request whose method has no known target field, or whose target field is
+    // absent, has no resolvable scope target and matches no grant (fail closed).
+    let Some(tool) = tool else {
+        return Err(PolicyError::AuthorizationScopeDenied);
+    };
 
     let permitted = grant.grants.iter().any(|g| {
         g.method == method && g.tool == tool && arguments_satisfied(g.arguments.as_ref(), arguments)
@@ -316,6 +342,13 @@ pub fn mint_reference_grant(
     issuer_key: &SigningKey,
     key_id: &str,
 ) -> Result<Vec<u8>, PolicyError> {
+    // Refuse to mint a grant with an empty target (#133): an empty `tool` can
+    // never be a legitimate scope key and would act as a silent wildcard for any
+    // method whose request target is not in `params.name`. Reject at mint time so
+    // such an artifact cannot be produced in the first place (fail closed).
+    if spec.operations.iter().any(|op| op.tool.is_empty()) {
+        return Err(PolicyError::AuthorizationMalformed);
+    }
     let grants: Vec<Value> = spec
         .operations
         .iter()
@@ -652,6 +685,121 @@ mod tests {
         assert_eq!(
             decision,
             AuthorizationDecision::Deny(PolicyError::AuthorizationScopeDenied)
+        );
+    }
+
+    /// #133: mint a signed artifact whose grants come straight from raw JSON,
+    /// bypassing the `mint_reference_grant` empty-target guard. Mirrors the mint
+    /// signing rule (sign canonical preimage with `signature.value` removed, then
+    /// re-canonicalize) so the issuer signature verifies and evaluation reaches
+    /// the scope check — letting us pin the PARSE-time guarantee independently of
+    /// the mint-time guard.
+    fn mint_with_raw_grants(grants: Value) -> Vec<u8> {
+        let mut artifact = json!({
+            "profile": REFERENCE_PROFILE_ID,
+            "issuer": ISSUER,
+            "grantee": AGENT,
+            "subject": USER,
+            "audience": SERVER,
+            "grants": grants,
+            "not_before": NOT_BEFORE,
+            "expires_at": EXPIRES_AT,
+            "revocation_id": "rev-1",
+            "signature": { "alg": mcps_core::SIG_ALG_ED25519, "key_id": ISSUER_KEY_ID },
+        });
+        let preimage = mcps_core::canonicalize_json_value(&artifact).unwrap();
+        artifact["signature"]["value"] = Value::String(issuer_key().sign(&preimage));
+        mcps_core::canonicalize_json_value(&artifact).unwrap()
+    }
+
+    /// #133: an issuer-minted EMPTY-tool grant for a non-name-keyed method
+    /// (`resources/read`, whose target lives in `params.uri`, not `params.name`)
+    /// must NOT silently authorize every resource. The signature, bindings,
+    /// window, and revocation all pass; only the empty-target guard denies. Fails
+    /// closed as `authorization_malformed`. Without the fix the request would be
+    /// ALLOWED (both grant `tool` and extracted target collapse to "").
+    #[test]
+    fn empty_tool_grant_does_not_wildcard_non_name_keyed_method() {
+        let artifact = mint_with_raw_grants(json!([
+            { "method": "resources/read", "tool": "" }
+        ]));
+        let verified = verified_for(&artifact);
+        let request = json!({
+            "jsonrpc": "2.0", "id": "req-1", "method": "resources/read",
+            "params": { "uri": "file:///etc/passwd" }
+        });
+        let decision = authorize(&artifact, &verified, &request, &InMemoryRevocationSource::new());
+        assert_eq!(
+            decision,
+            AuthorizationDecision::Deny(PolicyError::AuthorizationMalformed),
+            "an empty-tool grant must never act as a wildcard for a non-name-keyed method"
+        );
+    }
+
+    /// #133: `resources/read` scope is keyed on `params.uri`. A grant for one URI
+    /// must not authorize a request for a DIFFERENT URI (the pre-fix code derived
+    /// the target only from `params.name`, so every `resources/read` collapsed to
+    /// the same "" target and a single grant covered all resources).
+    #[test]
+    fn resources_read_scope_is_keyed_on_uri() {
+        let artifact = mint_with_raw_grants(json!([
+            { "method": "resources/read", "tool": "file:///allowed.txt" }
+        ]));
+        let verified = verified_for(&artifact);
+
+        // Matching URI → allowed.
+        let allowed = json!({
+            "jsonrpc": "2.0", "id": "req-1", "method": "resources/read",
+            "params": { "uri": "file:///allowed.txt" }
+        });
+        assert_eq!(
+            authorize(&artifact, &verified, &allowed, &InMemoryRevocationSource::new()),
+            AuthorizationDecision::Allow
+        );
+
+        // Different URI → scope denied.
+        let other = json!({
+            "jsonrpc": "2.0", "id": "req-1", "method": "resources/read",
+            "params": { "uri": "file:///secret.txt" }
+        });
+        assert_eq!(
+            authorize(&artifact, &verified, &other, &InMemoryRevocationSource::new()),
+            AuthorizationDecision::Deny(PolicyError::AuthorizationScopeDenied)
+        );
+    }
+
+    /// #133: a method with no known name-keyed target field (here `resources/read`
+    /// requested with `params.name` instead of `params.uri`) resolves no target
+    /// and must fail closed — it cannot match a grant by accident.
+    #[test]
+    fn unknown_target_field_fails_closed() {
+        let artifact = mint_with_raw_grants(json!([
+            { "method": "resources/read", "tool": "file:///allowed.txt" }
+        ]));
+        let verified = verified_for(&artifact);
+        let request = json!({
+            "jsonrpc": "2.0", "id": "req-1", "method": "resources/read",
+            "params": { "name": "file:///allowed.txt" }
+        });
+        assert_eq!(
+            authorize(&artifact, &verified, &request, &InMemoryRevocationSource::new()),
+            AuthorizationDecision::Deny(PolicyError::AuthorizationScopeDenied)
+        );
+    }
+
+    /// #133: the mint helper refuses to produce an empty-target grant in the first
+    /// place (defense at the mint boundary, complementing the parse-time guard).
+    #[test]
+    fn minting_empty_tool_grant_is_rejected() {
+        let mut spec = default_spec();
+        spec.operations = vec![GrantedOperation {
+            method: "resources/read".to_string(),
+            tool: String::new(),
+            arguments: None,
+        }];
+        assert_eq!(
+            mint_reference_grant(&spec, &issuer_key(), ISSUER_KEY_ID),
+            Err(PolicyError::AuthorizationMalformed)
         );
     }
 
