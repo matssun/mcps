@@ -117,7 +117,10 @@ nt_rust_test(
     srcs = ["tests/method_name_drift_guard_test.rs"],
     auto_cargo_toml = False,
     bazel_build_cfg = False,
-    data = ["//mcps-core:src_files"],
+    data = [
+        "//mcps-core:src_files",
+        "//mcps-core:src/lib.rs",
+    ],
     edition = "2021",
     env = {
         "MCPS_CORE_SRC_LIB": "$(rlocationpath //mcps-core:src/lib.rs)",
