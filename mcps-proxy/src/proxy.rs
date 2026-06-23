@@ -1123,6 +1123,20 @@ mod tests {
             now(),
         );
 
+        // Prove the minted assertion is itself cryptographically VALID: a
+        // standalone binding over the same trusted key accepts it (signature, key,
+        // request-hash binding, and freshness all pass). The builder-composition
+        // guard in handle_with_transport fails closed BEFORE lb.verify runs, so
+        // without this check the test would also pass for a malformed assertion.
+        // This pins that the rejection below is caused SOLELY by the missing
+        // transport binding, not by an invalid header.
+        let mut lb_verifier = LbAssertionBinding::new(IdentitySource::UriSan);
+        lb_verifier.add_key("lb-1", lb.public_key());
+        assert!(
+            lb_verifier.verify(&assertion, &request_hash, now()).is_ok(),
+            "the minted LB assertion must be cryptographically valid on its own"
+        );
+
         let out = proxy.handle_with_transport(
             &signed_request(nonce),
             now(),
