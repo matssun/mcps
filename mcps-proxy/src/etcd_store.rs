@@ -280,14 +280,6 @@ impl EtcdAtomicReplayStore {
         EtcdAtomicReplayStore { transport, clock }
     }
 
-    /// The exact lease TTL (seconds) `insert_if_absent` will request for
-    /// `expires_at_unix`, reading the store's OWN injected clock (NOT the trait's
-    /// `now_unix = 0`). Factored out so the MCPS-090 clock WIRING — that the store
-    /// derives the TTL from a real `now`, not 0 — is unit-testable deterministically
-    /// (see `ttl_secs_via_clock`) with a fixed clock and no etcd.
-    fn ttl_secs_for(&self, expires_at_unix: i64) -> i64 {
-        ttl_secs_via_clock(&self.clock, expires_at_unix)
-    }
 }
 
 /// The etcd `lease/revoke` request body for `POST /v3/lease/revoke`: the lease id as
@@ -318,15 +310,39 @@ impl AtomicReplayStore for EtcdAtomicReplayStore {
         expires_at_unix: i64,
         _now_unix: i64,
     ) -> Result<ReplayDecision, ReplayStoreError> {
+        // Read the store's OWN clock ONCE and reuse it for both the MCPS-08
+        // pre-store staleness guard and the lease-TTL derivation, so the guard and
+        // the granted lease agree on a single `now`.
+        let now_unix = (self.clock)();
+
+        // MCPS-08 defensive pre-store rejection (#142): if the (already skew-folded)
+        // retain-until is at or before `now`, the request is ALREADY STALE. Reject it
+        // BEFORE granting a lease or issuing the txn (fail closed → `Unavailable`),
+        // instead of the old behaviour that clamped the window up to a minimal 1 s
+        // lease, put-if-absent'd it, and reported `Fresh`. This enforces the ADR's
+        // pre-store rejection AT THIS LAYER — the LINEARIZABLE production backend —
+        // rather than relying solely on the upstream `mcps-core` freshness step
+        // running before replay; if that ordering ever regressed, an expired nonce
+        // would otherwise be admitted here. Mirrors the redis_store guard.
+        if crate::shared_replay::is_stale_pre_store(expires_at_unix, now_unix) {
+            return Err(ReplayStoreError::Unavailable {
+                details: format!(
+                    "replay request already stale: retain_until ({expires_at_unix}) \
+                     is at or before now ({now_unix}) — rejected pre-store (MCPS-08, \
+                     fail closed) rather than recorded as Fresh"
+                ),
+            });
+        }
+
         // Derive a server-side lease TTL from the (already skew-folded)
-        // retain-until instant relative to the store's OWN clock — NOT the trait's
-        // `now_unix`, which is 0 (the pure `ReplayCache` carries no clock).
+        // retain-until instant relative to the SAME `now` read above — NOT the
+        // trait's `now_unix`, which is 0 (the pure `ReplayCache` carries no clock).
         // Trusting that 0 was the MCPS-090 bug: it made the lease TTL ≈ the
         // absolute Unix epoch (~56 years), so keys ~never expired → unbounded
         // keyspace growth (DoS). Reading the real `now` here makes the TTL the
         // intended `retain_until - now` WINDOW (seconds), clamped to a positive
         // value etcd accepts.
-        let ttl_secs = self.ttl_secs_for(expires_at_unix);
+        let ttl_secs = compute_ttl_secs(expires_at_unix, now_unix);
 
         // 1) Grant a lease bounded by that TTL, so the nonce self-evicts after its
         //    freshness window (no client-side prune).
@@ -613,6 +629,35 @@ mod tests {
 
     fn fixed_clock() -> UnixClock {
         Box::new(|| 1_779_998_100)
+    }
+
+    /// MCPS-08 / #142: a request whose (skew-folded) retain-until is at or before
+    /// the store's own `now` is rejected PRE-STORE on the LINEARIZABLE etcd backend —
+    /// fail closed with `Unavailable`, and WITHOUT granting a lease or issuing the
+    /// put-if-absent txn, so a stale nonce is never recorded as Fresh. Without the
+    /// guard the old path clamped the lease TTL up to 1 s, put the key, and returned
+    /// Fresh. Reverting the guard makes this test fail (the transport sees calls and
+    /// the call returns `Fresh`), proving it exercises the finding.
+    #[test]
+    fn nonpositive_ttl_rejected_pre_store_no_etcd_calls() {
+        // fixed_clock() == 1_779_998_100; an expiry AT `now` is a non-positive
+        // remaining window (retain_until - now == 0 ⇒ stale).
+        let transport = Arc::new(ScriptedTransport::new(json!({ "succeeded": true }), false));
+        let store =
+            EtcdAtomicReplayStore::with_transport(Box::new(Arc::clone(&transport)), fixed_clock());
+        let err = store
+            .insert_if_absent("did:example:host|aud|nonce", 1_779_998_100, 0)
+            .expect_err("a non-positive-TTL request must be rejected, never admitted as Fresh");
+        assert!(
+            matches!(err, ReplayStoreError::Unavailable { .. }),
+            "stale pre-store rejection must fail closed as Unavailable, got {err:?}"
+        );
+        assert!(
+            transport.paths().is_empty(),
+            "no lease/grant or kv/txn may be issued for an already-stale request — it must be \
+             rejected BEFORE touching etcd, got calls: {:?}",
+            transport.paths()
+        );
     }
 
     /// A Replay outcome (txn `succeeded: false`) triggers a best-effort

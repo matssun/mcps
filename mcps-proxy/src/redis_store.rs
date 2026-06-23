@@ -178,14 +178,42 @@ pub fn system_clock() -> UnixClock {
 /// intended `retain_until - now` WINDOW (seconds × 1000), not the absolute Unix
 /// epoch (~1.78e12 ms ≈ 56 years).
 ///
-/// Clamps to a non-negative duration: if the retain-until has already passed, a
-/// minimal 1 ms TTL records the sighting just long enough to answer a same-instant
-/// racing replay, matching the in-memory store retaining the entry at its
-/// retain-until boundary. The seconds→ms multiply saturates so a pathological
-/// retain-until cannot overflow the `PX` argument.
+/// Clamps to a non-negative duration. The seconds→ms multiply saturates so a
+/// pathological retain-until cannot overflow the `PX` argument.
+///
+/// NOTE: in production this function is only ever reached for a STRICTLY-POSITIVE
+/// remaining window — [`insert_if_absent`](RedisAtomicReplayStore::insert_if_absent)
+/// rejects a non-positive window pre-store via [`is_nonpositive_ttl`] (MCPS-08).
+/// Because the remaining window is measured in WHOLE SECONDS, any admitted window
+/// is `>= 1 s`, so the result is `>= 1000 ms`; the trailing `.max(1)` is therefore
+/// an unreachable defensive floor for an admitted nonce. It only takes effect if
+/// this pure function is called directly with a non-positive window (as the unit
+/// test does), and never admits an already-stale nonce into the store.
 pub(crate) fn compute_ttl_ms(expires_at_unix: i64, now_unix: i64) -> u64 {
     let ttl_secs = expires_at_unix.saturating_sub(now_unix).max(0);
     (ttl_secs as u64).saturating_mul(1000).max(1)
+}
+
+/// MCPS-08 defensive pre-store guard: `true` when the remaining window
+/// `retain_until - now` is NON-POSITIVE (the retain-until is at or before `now`),
+/// i.e. the request is ALREADY STALE and MUST be rejected BEFORE the shared store
+/// is consulted, fail closed — never SET NX'd and reported `Fresh`.
+///
+/// Pure (no clock, no I/O) so the boundary is unit-testable without a live Redis,
+/// mirroring [`wait_quorum_satisfied`] / [`classify_fresh_insert_wait`]. The
+/// caller reads the store's OWN injected clock for `now_unix` (the trait's
+/// `now_unix = 0` is vestigial). Equality (`retain_until == now`) counts as
+/// non-positive: at the retain-until boundary the nonce can no longer pass the
+/// freshness window, so admitting it as `Fresh` would only ever record an
+/// already-expired sighting.
+///
+/// This enforces the ADR's explicit pre-store rejection AT THIS LAYER rather than
+/// depending solely on the upstream `mcps-core` freshness step (`now > expires_at
+/// + skew → reject`) running before replay; if that ordering ever regresses, this
+/// guard still fails closed instead of clamping an expired window to a minimal
+/// positive TTL and admitting the nonce.
+pub(crate) fn is_nonpositive_ttl(expires_at_unix: i64, now_unix: i64) -> bool {
+    expires_at_unix.saturating_sub(now_unix) <= 0
 }
 
 /// The connection parameters retained so a transient-failure RECONNECT (M19) uses
@@ -307,23 +335,19 @@ impl RedisAtomicReplayStore {
         self.wait_quorum = Some(WaitQuorum { quorum, timeout_ms });
         self
     }
-
-    /// The exact `PX` TTL (ms) `insert_if_absent` will apply for `expires_at_unix`,
-    /// reading the store's OWN injected clock (NOT the trait's `now_unix = 0`).
-    /// Factored out so the H-8/H-9 clock WIRING — that the store derives the TTL
-    /// from a real `now` via the injected clock, not 0 — is unit-testable
-    /// deterministically (see [`ttl_ms_via_clock`]) with a fixed clock and no
-    /// Redis.
-    fn ttl_ms_for(&self, expires_at_unix: i64) -> u64 {
-        ttl_ms_via_clock(&self.clock, expires_at_unix)
-    }
 }
 
 /// The clock-WIRING path, isolated from any Redis connection: read `clock` for the
-/// current Unix time and derive the `PX` TTL. This is the exact computation
-/// [`RedisAtomicReplayStore::insert_if_absent`] performs, so a unit test that
-/// injects a fixed clock proves the store derives the TTL from a REAL `now` (the
-/// H-8/H-9 fix), not the trait's hard-wired `0`, with NO live Redis.
+/// current Unix time and derive the `PX` TTL. This is the exact TTL computation
+/// [`RedisAtomicReplayStore::insert_if_absent`] performs once it has passed the
+/// MCPS-08 pre-store staleness guard, so a unit test that injects a fixed clock
+/// proves the store derives the TTL from a REAL `now` (the H-8/H-9 fix), not the
+/// trait's hard-wired `0`, with NO live Redis.
+///
+/// Test-only since the MCPS-08 pre-store guard inlined the single clock read into
+/// [`RedisAtomicReplayStore::insert_if_absent`] (the guard and the TTL now share one
+/// `now`); this helper remains the deterministic unit-test seam for that wiring.
+#[cfg(test)]
 fn ttl_ms_via_clock(clock: &UnixClock, expires_at_unix: i64) -> u64 {
     compute_ttl_ms(expires_at_unix, clock())
 }
@@ -547,6 +571,29 @@ impl AtomicReplayStore for RedisAtomicReplayStore {
         expires_at_unix: i64,
         _now_unix: i64,
     ) -> Result<ReplayDecision, ReplayStoreError> {
+        // Read the store's OWN clock ONCE (the proxy's impure edge) and reuse it
+        // for both the MCPS-08 pre-store staleness guard and the TTL derivation,
+        // so the guard and the `PX` window agree on a single `now`.
+        let now_unix = (self.clock)();
+
+        // MCPS-08 defensive pre-store rejection: if the (already skew-folded)
+        // retain-until is at or before `now`, the request is ALREADY STALE. Reject
+        // it BEFORE touching Redis (fail closed → `Unavailable`), instead of the old
+        // behaviour that clamped the window to a minimal 1 ms TTL, SET NX'd it, and
+        // reported `Fresh`. This enforces the ADR's pre-store rejection AT THIS
+        // LAYER rather than relying solely on the upstream `mcps-core` freshness
+        // step running before replay; if that ordering ever regressed, an expired
+        // nonce would otherwise be admitted here.
+        if is_nonpositive_ttl(expires_at_unix, now_unix) {
+            return Err(ReplayStoreError::Unavailable {
+                details: format!(
+                    "replay request already stale: retain_until ({expires_at_unix}) \
+                     is at or before now ({now_unix}) — rejected pre-store (MCPS-08, \
+                     fail closed) rather than recorded as Fresh"
+                ),
+            });
+        }
+
         // Derive a server-side TTL from the (already skew-folded) retain-until
         // instant relative to the store's OWN clock — NOT the trait's `now_unix`,
         // which is 0 (the pure `ReplayCache` carries no clock). Trusting that 0
@@ -554,7 +601,7 @@ impl AtomicReplayStore for RedisAtomicReplayStore {
         // ~1.78e9) × 1000 ≈ 56 years, so keys ~never expired → unbounded keyspace
         // growth (DoS). Reading the real `now` here makes `PX` the intended
         // `retain_until - now` WINDOW.
-        let ttl_ms = self.ttl_ms_for(expires_at_unix);
+        let ttl_ms = compute_ttl_ms(expires_at_unix, now_unix);
         // Copied out of `self` so the op closure (Fn) captures a plain value.
         let wait_quorum = self.wait_quorum;
 
@@ -660,6 +707,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::compute_ttl_ms;
+    use super::is_nonpositive_ttl;
     use super::run_with_reconnect;
     use super::ttl_ms_via_clock;
     use super::classify_fresh_insert_wait;
@@ -785,13 +833,67 @@ mod tests {
         );
     }
 
-    /// A retain-until at/before `now` clamps to a minimal positive TTL (never 0,
-    /// never negative): records the sighting just long enough to answer a
-    /// same-instant racing replay.
+    /// `compute_ttl_ms` itself still floors a non-positive raw window to a minimal
+    /// positive TTL (never 0, never negative) — exercised here by calling the pure
+    /// function directly. In production it is only ever REACHED for a
+    /// strictly-positive window, because `insert_if_absent` rejects a non-positive
+    /// window pre-store (see `is_nonpositive_ttl` and the regression test below);
+    /// an admitted whole-second window is `>= 1000 ms`, so the `.max(1)` floor is
+    /// an unreachable defensive guard for an admitted nonce.
     #[test]
     fn ttl_ms_clamps_to_minimal_when_already_expired() {
         assert_eq!(compute_ttl_ms(1_000, 1_000), 1, "exactly-now → 1ms");
         assert_eq!(compute_ttl_ms(900, 1_000), 1, "already-past → 1ms, not 0/neg");
+    }
+
+    /// MCPS-08 regression (finding #142) — PURE, no-Redis proof of the pre-store
+    /// staleness boundary. A NON-POSITIVE remaining window (`retain_until <= now`)
+    /// must be flagged stale so `insert_if_absent` rejects it BEFORE the SET NX,
+    /// while a strictly-positive window is admitted to the store. WITHOUT the fix
+    /// `compute_ttl_ms` clamped an already-expired window up to 1 ms and the store
+    /// still SET NX'd it and returned `Fresh`; this predicate is the gate that now
+    /// fails closed instead.
+    #[test]
+    fn nonpositive_window_is_flagged_stale_pre_store() {
+        // Boundary: retain_until exactly at now is non-positive → reject.
+        assert!(is_nonpositive_ttl(1_000, 1_000), "exactly-now is non-positive → reject");
+        // Already past → reject.
+        assert!(is_nonpositive_ttl(900, 1_000), "already-past is non-positive → reject");
+        // A strictly-positive window (1s remaining) is admitted to the store.
+        assert!(!is_nonpositive_ttl(1_001, 1_000), "a positive window is admitted");
+        // And the historical now=0 vestigial path: a real future retain-until with
+        // now=0 is a huge positive window (NOT stale) — the guard must not over-fire.
+        assert!(!is_nonpositive_ttl(1_779_998_730, 0), "future retain-until is not stale");
+    }
+
+    /// MCPS-08 regression (finding #142) — proof that the SAME injected clock the
+    /// store reads for its TTL also drives the pre-store staleness gate, so the gate
+    /// and the `PX` window agree on one `now`. With a fixed clock at `now`, a
+    /// retain-until in the past is flagged stale (→ pre-store reject), while a
+    /// retain-until in the future yields a positive TTL window (→ admitted). This is
+    /// the deterministic, no-Redis half of the wiring; the real `insert_if_absent`
+    /// SET path is exercised by the gated live-Redis e2e (same split as the other
+    /// store ops, which prove their logic via pure helpers, not a live connection).
+    #[test]
+    fn injected_clock_drives_the_pre_store_staleness_gate() {
+        let now: i64 = 1_779_998_730;
+        let clock: UnixClock = Box::new(move || now);
+
+        // Past retain-until → stale → would be rejected pre-store.
+        assert!(
+            is_nonpositive_ttl(now - 100, clock()),
+            "a retain-until before the injected now must be flagged stale"
+        );
+        // Future retain-until → positive window → admitted, TTL is the window.
+        assert!(
+            !is_nonpositive_ttl(now + 600, clock()),
+            "a retain-until after the injected now must NOT be flagged stale"
+        );
+        assert_eq!(
+            ttl_ms_via_clock(&clock, now + 600),
+            600 * 1000,
+            "the admitted window TTL is (retain_until - injected_now) ms"
+        );
     }
 
     /// H-10 regression — runs ANYWHERE, no real Redis. A TCP SINKHOLE (binds,

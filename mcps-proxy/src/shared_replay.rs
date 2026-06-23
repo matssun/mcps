@@ -83,6 +83,24 @@ impl From<ReplayStoreError> for ReplayCacheError {
     }
 }
 
+/// MCPS-08 defensive pre-store guard: `true` when the remaining window
+/// `retain_until - now` is NON-POSITIVE (the skew-folded retain-until is at or
+/// before `now`), i.e. the request is ALREADY STALE and MUST be rejected BEFORE
+/// the shared store is consulted, fail closed — never recorded and reported
+/// `Fresh`.
+///
+/// Pure (no clock, no I/O) so the boundary is unit-testable. A store that owns a
+/// real clock (the Redis backend) passes that clock's `now`; a store with no clock
+/// (the in-memory reference) is handed the trait's vestigial `now_unix = 0`, so
+/// the guard there reduces to "a non-positive ABSOLUTE retain-until is rejected" —
+/// a degenerate request expiring at or before the Unix epoch can never legitimately
+/// be `Fresh`. Either way the layer enforces the ADR's explicit pre-store rejection
+/// of a non-positive TTL defensively, instead of depending SOLELY on the upstream
+/// `mcps-core` freshness step running before replay.
+pub(crate) fn is_stale_pre_store(retain_until_unix: i64, now_unix: i64) -> bool {
+    retain_until_unix.saturating_sub(now_unix) <= 0
+}
+
 /// The minimal SHARED, server-side-ATOMIC primitive a [`SharedReplayCache`] needs
 /// from any backing store.
 ///
@@ -310,8 +328,25 @@ impl AtomicReplayStore for InMemoryAtomicReplayStore {
         &self,
         key: &str,
         expires_at_unix: i64,
-        _now_unix: i64,
+        now_unix: i64,
     ) -> Result<ReplayDecision, ReplayStoreError> {
+        // MCPS-08 defensive pre-store rejection: an already-stale request (a
+        // non-positive remaining window) is rejected fail-closed BEFORE the store
+        // is consulted, never recorded and reported `Fresh`. This reference store
+        // carries no clock, so `now_unix` is the trait's vestigial 0 and the guard
+        // reduces to rejecting a non-positive ABSOLUTE retain-until — a degenerate
+        // request expiring at or before the Unix epoch. It enforces the contract
+        // at this layer rather than relying solely on the upstream `mcps-core`
+        // freshness step running before replay.
+        if is_stale_pre_store(expires_at_unix, now_unix) {
+            return Err(ReplayStoreError::Unavailable {
+                details: format!(
+                    "replay request already stale: retain_until ({expires_at_unix}) \
+                     is at or before now ({now_unix}) — rejected pre-store (MCPS-08, \
+                     fail closed) rather than recorded as Fresh"
+                ),
+            });
+        }
         // A poisoned mutex is an operational failure → fail closed (Unavailable),
         // never a silent "allow".
         let mut map = self.seen.lock().map_err(|e| ReplayStoreError::Unavailable {
@@ -350,6 +385,7 @@ mod tests {
 
     use super::AtomicReplayStore;
     use super::InMemoryAtomicReplayStore;
+    use super::is_stale_pre_store;
     use super::ReplayStoreError;
     use super::SharedReplayCache;
     use mcps_core::McpsError;
@@ -613,5 +649,70 @@ mod tests {
         match cache_err {
             ReplayCacheError::Unavailable { details } => assert_eq!(details, "conn refused"),
         }
+    }
+
+    /// MCPS-08 regression (finding #142) — PURE proof of the pre-store staleness
+    /// boundary. A non-positive remaining window (`retain_until <= now`) is flagged
+    /// stale (→ reject); a strictly-positive window is admitted. At this clock-free
+    /// layer the store receives the trait's vestigial `now_unix = 0`, so the guard
+    /// reduces to rejecting a non-positive ABSOLUTE retain-until.
+    #[test]
+    fn nonpositive_window_is_flagged_stale_pre_store() {
+        assert!(is_stale_pre_store(1_000, 1_000), "exactly-now is non-positive → reject");
+        assert!(is_stale_pre_store(900, 1_000), "already-past is non-positive → reject");
+        assert!(!is_stale_pre_store(1_001, 1_000), "a positive window is admitted");
+        // With the vestigial now=0 the in-memory store actually receives: a real
+        // future retain-until is a huge positive window (NOT stale); a degenerate
+        // non-positive absolute retain-until IS stale.
+        assert!(!is_stale_pre_store(EXPIRES + SKEW, 0), "future retain-until is not stale");
+        assert!(is_stale_pre_store(0, 0), "retain-until at the epoch is stale");
+        assert!(is_stale_pre_store(-5, 0), "a negative absolute retain-until is stale");
+    }
+
+    /// MCPS-08 regression (finding #142) — WIRING proof through the real in-memory
+    /// store, default features. An already-stale request (a non-positive absolute
+    /// retain-until, given the vestigial `now_unix = 0` this clock-free store
+    /// receives) is REJECTED fail-closed PRE-STORE and is NOT recorded: the store
+    /// stays empty and a subsequent valid request for the SAME key is still `Fresh`
+    /// (the stale attempt left no `Replay`-causing entry). WITHOUT the guard the
+    /// store would `insert` the entry and return `Fresh`, recording an already-
+    /// expired sighting.
+    #[test]
+    fn already_stale_request_rejected_pre_store_not_recorded_as_fresh() {
+        let store = InMemoryAtomicReplayStore::new();
+        // retain_until at/before now (now = vestigial 0 the store is handed).
+        let err = store
+            .insert_if_absent("k", 0, 0)
+            .expect_err("an already-stale request must be rejected, never admitted as Fresh");
+        assert!(
+            matches!(err, ReplayStoreError::Unavailable { .. }),
+            "a stale pre-store rejection must fail closed as Unavailable"
+        );
+        // It was NOT recorded: the store is empty and a later valid request is Fresh.
+        assert!(store.is_empty(), "a rejected stale request must leave NO entry behind");
+        assert_eq!(
+            store.insert_if_absent("k", EXPIRES + SKEW, 0),
+            Ok(ReplayDecision::Fresh),
+            "the key was never recorded, so a valid request is still Fresh"
+        );
+    }
+
+    /// MCPS-08 regression (finding #142) — same guard surfaced through the full
+    /// `SharedReplayCache` path, default features: a stale request fails closed as
+    /// `ReplayCacheError::Unavailable` → `McpsError::ReplayCacheUnavailable` (never
+    /// `Fresh`, never "allow"). The cache folds skew into `retain_until = expires_at
+    /// + skew`, so to drive a non-positive absolute retain-until (given the store's
+    /// vestigial now=0) we pass an `expires_at` that nets to <= 0 after skew.
+    #[test]
+    fn stale_request_via_shared_cache_fails_closed() {
+        let store = InMemoryAtomicReplayStore::new();
+        let mut cache = SharedReplayCache::new(Box::new(store.clone()), SKEW);
+        // retain_until = expires_at + SKEW = -SKEW + SKEW = 0 → non-positive → stale.
+        let err = cache
+            .check_and_insert(SIGNER, AUD, NONCE, -SKEW)
+            .expect_err("a stale request must fail closed, never be admitted as Fresh");
+        assert!(matches!(err, ReplayCacheError::Unavailable { .. }));
+        assert_eq!(McpsError::from(err), McpsError::ReplayCacheUnavailable);
+        assert!(store.is_empty(), "the stale request must not have been recorded");
     }
 }
