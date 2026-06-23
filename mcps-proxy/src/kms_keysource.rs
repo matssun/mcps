@@ -22,6 +22,7 @@
 use std::sync::Arc;
 
 use mcps_core::b64url_encode;
+use mcps_core::verify_ed25519;
 use mcps_core::VerificationKey;
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::PrivateKeyDer;
@@ -118,7 +119,25 @@ impl ResponseSigner for KmsResponseSigner {
             )));
         }
         // Match SigningKey::sign EXACTLY: Base64URL-no-pad of the raw 64 bytes.
-        Ok(b64url_encode(&signature))
+        let encoded = b64url_encode(&signature);
+        // ADR-MCPS-028 §D, enforced AT THE SEAM (mirroring DelegatedResponseSigner):
+        // re-verify the backend's signature against THIS signer's advertised public
+        // key (`response_public_key`) before emitting. The concrete AWS/GCP backends
+        // already self-verify (defense in depth, kept), but centralizing the check
+        // here makes the "EVERY signature is verified locally before it is emitted"
+        // property hold for ANY `KmsEd25519Backend` — including a future backend that
+        // forgot to self-verify, or one wired to a mismatched key. Fail closed: never
+        // emit a response signature the proxy's own advertised key cannot verify.
+        // One verify per response sign — negligible.
+        let public_key = self.response_public_key()?;
+        verify_ed25519(preimage, &encoded, &public_key).map_err(|_| {
+            KeyError::Malformed(
+                "kms: backend produced a signature that does not verify as Ed25519 under its \
+                 advertised public key (response_public_key)"
+                    .to_string(),
+            )
+        })?;
+        Ok(encoded)
     }
 
     fn response_public_key(&self) -> Result<VerificationKey, KeyError> {
@@ -315,10 +334,12 @@ mod tests {
 
     /// A backend that signs a PRE-HASH of the preimage (the forbidden Ed25519ph /
     /// DIGEST mode) produces a 64-byte signature that PASSES the length check but
-    /// FAILS verification over the raw preimage — so the verify-under-mcps-core
-    /// assertion in the live lane catches a misconfigured DIGEST KMS key.
+    /// does NOT verify over the raw preimage. Finding #138: with verify-before-return
+    /// centralized at the seam, `sign_response` itself catches this (fail closed) —
+    /// the misconfigured DIGEST KMS key never yields an emitted signature, not even
+    /// one that a later external verify would have to reject.
     #[test]
-    fn prehash_mode_is_caught_by_the_verify_assertion() {
+    fn prehash_mode_is_caught_at_the_seam() {
         struct PrehashKms {
             key: SigningKey,
         }
@@ -336,11 +357,52 @@ mod tests {
         }
         let signer = KmsResponseSigner::new(Box::new(PrehashKms { key: test_key() }));
         let preimage = b"mcps canonical response preimage";
-        let sig = signer.sign_response(preimage).expect("length ok");
-        let pubkey = signer.response_public_key().expect("pubkey");
         assert!(
-            verify_ed25519(preimage, &sig, &pubkey).is_err(),
-            "a prehash/DIGEST signature must NOT verify over the raw preimage"
+            matches!(
+                signer.sign_response(preimage),
+                Err(KeyError::Malformed(_))
+            ),
+            "a prehash/DIGEST signature must fail closed at the seam (it does not \
+             verify over the raw preimage under the advertised key)"
+        );
+    }
+
+    /// Finding #138 / ADR-MCPS-028 §D AT THE SEAM: a backend that returns a
+    /// STRUCTURALLY VALID 64-byte Ed25519 signature that does NOT verify under the
+    /// public key the same backend advertises (e.g. a future backend that forgot to
+    /// self-verify, or one wired to a mismatched key) must be caught by
+    /// `KmsResponseSigner::sign_response` itself — the seam — and never emitted. This
+    /// is the property `DelegatedResponseSigner` enforces; here it is enforced for
+    /// ANY `KmsEd25519Backend`, not only the concrete AWS/GCP ones that self-verify.
+    #[test]
+    fn mismatched_key_signature_fails_closed_at_the_seam() {
+        // The backend signs with one key but advertises a DIFFERENT public key, so
+        // the (well-formed, 64-byte) signature cannot verify under what it reports.
+        struct MismatchedKms {
+            signing_key: SigningKey,
+            advertised: SigningKey,
+        }
+        impl KmsEd25519Backend for MismatchedKms {
+            fn sign_raw_ed25519(&self, preimage: &[u8]) -> Result<Vec<u8>, KeyError> {
+                Ok(b64url_decode(&self.signing_key.sign(preimage)).expect("b64url"))
+            }
+            fn public_key_spki_der(&self) -> Result<Vec<u8>, KeyError> {
+                Ok(ed25519_spki_from_raw(&self.advertised.public_key().to_bytes()))
+            }
+        }
+        let signer = KmsResponseSigner::new(Box::new(MismatchedKms {
+            signing_key: SigningKey::from_seed_bytes(&[11u8; 32]),
+            advertised: SigningKey::from_seed_bytes(&[12u8; 32]),
+        }));
+        // The signature is a valid 64-byte Ed25519 signature (passes the length
+        // check), so only the verify-before-return at the seam can catch it.
+        assert!(
+            matches!(
+                signer.sign_response(b"mcps canonical response preimage"),
+                Err(KeyError::Malformed(_))
+            ),
+            "a 64-byte signature that does not verify under the advertised public key \
+             must fail closed at the KmsResponseSigner seam"
         );
     }
 
