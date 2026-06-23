@@ -315,6 +315,23 @@ impl Proxy {
                 let lb_verified_identity: Option<TransportIdentity> = match &self.lb_assertion {
                     None => None,
                     Some(lb) => {
+                        // Builder-composition guard (issue #135): the LB assertion
+                        // exists ONLY to SUPPLY the request-bound verified identity
+                        // that `transport_binding` then ties to `verified_signer`. If
+                        // no transport-binding policy is configured, the verified
+                        // identity below would be consumed by nothing — the
+                        // signer↔identity binding the assertion is verified to enforce
+                        // would be silently dropped. That is a misconfiguration, not a
+                        // weaker-but-valid mode: fail closed rather than admit a
+                        // request whose asserted identity is never bound. (The shipped
+                        // CLI always pairs the two; this closes the gap for any other
+                        // embedder/test that wires only the LB assertion.)
+                        if self.transport_binding.is_none() {
+                            return json_rpc_error_object(
+                                &McpsError::TransportBindingFailed,
+                                &id_value,
+                            );
+                        }
                         let header = match lb_assertion_header {
                             Some(value) => value,
                             // Required-but-absent assertion header → fail closed.
@@ -1021,6 +1038,118 @@ mod tests {
         assert!(
             out_value(&out).get("error").is_some(),
             "a duplicate-id request must fail closed with a JSON-RPC error"
+        );
+    }
+
+    // ---- Issue #135: an LB assertion without a transport binding fails closed ----
+
+    /// Mint a wire-form Tier-3 LB ingress assertion bound to `request_hash`,
+    /// signed by `lb` under `key_id` at `validation_time` — the same five
+    /// `.`-separated base64url fields the transport-module verifier accepts.
+    fn mint_lb_assertion(
+        lb: &SigningKey,
+        key_id: &str,
+        identity: &str,
+        request_hash: &str,
+        validation_time: i64,
+    ) -> String {
+        let assertion = crate::transport::LbAssertion {
+            key_id: key_id.to_string(),
+            asserted_client_identity: identity.to_string(),
+            request_hash: request_hash.to_string(),
+            validation_time,
+        };
+        let signature = lb.sign(&assertion.signing_preimage());
+        format!(
+            "{}.{}.{}.{}.{}",
+            mcps_core::b64url_encode(key_id.as_bytes()),
+            mcps_core::b64url_encode(identity.as_bytes()),
+            mcps_core::b64url_encode(request_hash.as_bytes()),
+            mcps_core::b64url_encode(&validation_time.to_be_bytes()),
+            signature,
+        )
+    }
+
+    /// A `Proxy` configured with an LB-assertion verifier but NO transport-binding
+    /// policy must fail closed: the assertion exists ONLY to supply the verified
+    /// identity that the binding then ties to the request signer, so without a
+    /// binding the signer↔identity binding would be silently dropped. A VALID,
+    /// request-bound, in-window assertion (one that would otherwise verify) must
+    /// therefore still be rejected and never reach the inner server — proving the
+    /// guard, not merely some other rejection. (Production wiring always pairs the
+    /// two; this pins the builder-composition footgun closed for any embedder/test
+    /// that wires only the LB assertion.)
+    #[test]
+    fn lb_assertion_without_transport_binding_fails_closed() {
+        use crate::transport::IdentitySource;
+        use crate::transport::LbAssertionBinding;
+
+        let nonce = "nonce-lb-no-binding-1";
+        let lb_seed = [42u8; 32];
+        let lb = SigningKey::from_seed_bytes(&lb_seed);
+
+        // A verifier that DOES trust the LB key, so the assertion below would
+        // pass every cryptographic check — only the missing binding fails it.
+        let mut lb_binding = LbAssertionBinding::new(IdentitySource::UriSan);
+        lb_binding.add_key("lb-1", lb.public_key());
+
+        // The inner must NOT be reached; flag it if it ever is.
+        let reached = Arc::new(Mutex::new(false));
+        let reached_inner = Arc::clone(&reached);
+        let inner = move |_request: &[u8]| -> Vec<u8> {
+            *reached_inner.lock().expect("lock") = true;
+            serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": REQUEST_ID, "result": {} }))
+                .expect("serialize inner result")
+        };
+        // Built WITH the LB assertion but WITHOUT a transport binding.
+        let proxy = Proxy::new(
+            server_key(),
+            SERVER,
+            SERVER_KEY_ID,
+            Box::new(inbound_resolver()),
+            AUDIENCE,
+            SKEW,
+            Box::new(inner),
+        )
+        .with_lb_assertion(lb_binding);
+
+        // A genuinely valid assertion bound to THIS request's hash, in-window.
+        let request_hash = expected_request_hash(nonce);
+        let assertion = mint_lb_assertion(
+            &lb,
+            "lb-1",
+            "spiffe://example.org/agent-1",
+            &request_hash,
+            now(),
+        );
+
+        let out = proxy.handle_with_transport(
+            &signed_request(nonce),
+            now(),
+            None,
+            Some(&assertion),
+        );
+
+        // Fail closed: the inner server is never reached...
+        assert!(
+            !*reached.lock().expect("lock"),
+            "a valid LB assertion with no transport binding must not reach the inner server"
+        );
+        // ...the client gets an unsigned JSON-RPC error, NOT a signed response...
+        assert!(
+            verify_response(&out, &server_resolver(), &request_hash).is_err(),
+            "an unbound LB assertion must never yield a verifiable signed response"
+        );
+        let value = out_value(&out);
+        assert!(
+            value.get("error").is_some(),
+            "an unbound LB assertion must fail closed with a JSON-RPC error"
+        );
+        // ...and the failure is the transport-boundary token, not some unrelated one.
+        assert_eq!(
+            value["error"]["data"]["mcps_error"],
+            json!(mcps_core::McpsError::TransportBindingFailed.wire_code()),
+            "the rejection must be mcps.transport_binding_failed"
         );
     }
 
