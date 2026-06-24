@@ -138,7 +138,7 @@ cargo test -p mcps-proxy --features gcp_kms_keysource \
 # 2. Delegated-TLS lane: real mTLS handshake signed by KMS + wrong-key-binding +
 #    untrusted-client negatives.
 cargo test -p mcps-proxy --features gcp_kms_keysource \
-  --test gcp_kms_delegated_tls_live_test -- --ignored --nocapture
+  --test gcp_kms_delegated_tls_live_test -- --ignored --nocapture --test-threads=1
 
 echo
 echo "OK — live GCP KMS validation passed (object signing + delegated TLS, with"
