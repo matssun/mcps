@@ -76,6 +76,8 @@ fn gcp_kms_signature_verifies_under_mcps_core() {
     // Only meaningful on the bearer-token path, not the workload-identity metadata
     // path (which ignores MCPS_GCP_ACCESS_TOKEN).
     if !use_metadata {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("env lock");
         let saved = std::env::var("MCPS_GCP_ACCESS_TOKEN").ok();
         std::env::set_var("MCPS_GCP_ACCESS_TOKEN", "not-a-valid-token");
         let result = GcpKmsEd25519Backend::new(&config, false);
