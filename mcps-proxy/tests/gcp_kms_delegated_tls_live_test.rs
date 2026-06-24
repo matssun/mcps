@@ -153,10 +153,10 @@ impl RemoteKeyPair for GcpRemoteKey {
 /// Extract the 32-byte raw Ed25519 point from an RFC 8410 SPKI (44 bytes: 12-byte
 /// prefix + 32-byte point), failing closed on any other shape.
 fn raw_point_from_spki(spki: &[u8]) -> [u8; 32] {
-    assert_eq!(
-        spki.len(),
-        44,
-        "expected a 44-byte RFC 8410 Ed25519 SPKI from Cloud KMS, got {} bytes",
+    const ED25519_SPKI_PREFIX: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+    assert!(
+        spki.len() == 44 && spki.starts_with(&ED25519_SPKI_PREFIX),
+        "expected an RFC 8410 Ed25519 SPKI (12-byte prefix + 32-byte point) from Cloud KMS, got {} bytes",
         spki.len()
     );
     spki[12..44].try_into().expect("32-byte ed25519 point")
