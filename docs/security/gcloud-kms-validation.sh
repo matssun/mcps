@@ -133,7 +133,7 @@ cd "$REPO_ROOT"
 
 # 1. Object-signing lane: positive verify + wrong-identity + bad-token + non-Ed25519.
 cargo test -p mcps-proxy --features gcp_kms_keysource \
-  --test gcp_kms_live_test -- --ignored --nocapture
+  --test gcp_kms_live_test -- --ignored --nocapture --test-threads=1
 
 # 2. Delegated-TLS lane: real mTLS handshake signed by KMS + wrong-key-binding +
 #    untrusted-client negatives.
