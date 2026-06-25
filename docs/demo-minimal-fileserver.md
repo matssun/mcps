@@ -101,13 +101,28 @@ fixture are delivered to the demo via Bazel runfiles; nothing is hardcoded.
 
 ## Commands to run
 
-Run all commands from the repository root, using `//mcps-demo:...` labels.
+Run all commands from the repository root.
+
+The simplest path builds the workspace and runs both demos in one command (no
+cloud credentials, no env setup):
 
 ```sh
-# The positive happy path.
-bazel run //mcps-demo:demo_positive
+./scripts/demo-local.sh
+```
 
-# The negative / security path (ten fail-closed cases).
+Or run the lanes individually under either build system. The demo bins resolve
+the inner fileserver and the `demo_root/` fixture automatically (Bazel runfiles
+env vars when set; otherwise the Cargo `target/<profile>/` output and the
+workspace-relative fixture — see [`mcps-demo/src/demo_paths.rs`](../mcps-demo/src/demo_paths.rs)),
+so no env vars are required for the Cargo path:
+
+```sh
+# Cargo (after `cargo build --workspace --bins`):
+cargo run -p mcps-demo --bin demo_positive   # the positive happy path
+cargo run -p mcps-demo --bin demo_negative   # the ten fail-closed cases
+
+# Bazel:
+bazel run //mcps-demo:demo_positive
 bazel run //mcps-demo:demo_negative
 
 # The full test suite for the demo crates.
@@ -524,47 +539,65 @@ What to read from it:
 
 ## Expected failure outputs
 
-`bazel run //mcps-demo:demo_negative` drives ten rejected cases and prints one
-structured line per case. It exits `0` only if **every** case is rejected with
-the expected reason — a missing rejection is a security regression and the demo
+`demo_negative` drives ten rejected cases, grouped by category, and prints one
+`PASS` line per case carrying the frozen `mcps.*` reason code. It exits `0` only
+if **every** case is rejected with the expected reason **and** the expected
+inner-reach behavior — a missing rejection is a security regression and the demo
 fails loudly with a non-zero exit. Observed output:
 
 ```text
-denial case=1_tampered_body          reason=mcps.invalid_signature               inner_reached=false
-denial case=2_tampered_id            reason=mcps.invalid_signature               inner_reached=false
-denial case=3_replay                 reason=mcps.replay_detected                 inner_reached=true
-denial case=4_expired                reason=mcps.expired_request                 inner_reached=false
-denial case=5_wrong_audience         reason=mcps.invalid_audience                inner_reached=false
-denial case=6_missing_envelope       reason=mcps.missing_envelope                inner_reached=false
-denial case=7_caller_verified        reason=stripped+replaced                    inner_reached=true (impostor .verified stripped; verifier=did:example:server-1)
-denial case=8_unauthorized           reason=mcps.authorization_scope_denied      inner_reached=false
-denial case=9_wrong_response_hash    reason=mcps.response_hash_mismatch          inner_reached=true
-denial case=10_bad_response_signature reason=mcps.response_sig_invalid            inner_reached=true
-OK: all 10 negative cases rejected with the expected mcps.* reason
+MCP-S local fail-closed paths — each case must be rejected with its frozen mcps.* reason:
+
+Request integrity:
+  PASS tampered_body            mcps.invalid_signature
+  PASS tampered_id              mcps.invalid_signature
+
+Freshness / replay:
+  PASS replay                   mcps.replay_detected
+  PASS expired                  mcps.expired_request
+
+Routing / binding:
+  PASS wrong_audience           mcps.invalid_audience
+  PASS missing_envelope         mcps.missing_envelope
+
+Verified context:
+  PASS caller_verified          stripped+replaced (impostor .verified stripped; verifier=did:example:server-1)
+
+Authorization:
+  PASS unauthorized_path        mcps.authorization_scope_denied
+
+Response binding:
+  PASS wrong_response_hash      mcps.response_hash_mismatch
+  PASS bad_response_signature   mcps.response_sig_invalid
+
+OK: all 10 fail-closed cases rejected with the expected mcps.* reason
 ```
 
-Reading the `inner_reached` column matters as much as the reason code:
+The printed line is cosmetic; the **assertions** behind each `PASS` are the
+contract, and they include the inner-reach expectation as well as the reason code:
 
-- Pre-dispatch cases (1, 2, 4, 5, 6, 8) report `inner_reached=false` — the
-  sidecar refused the request **before** the inner fileserver was ever spawned.
-- Case 3 (`replay`) reports `inner_reached=true` because the **first** (accepted)
-  send legitimately reached the inner server; the security property is that the
+- Pre-dispatch cases (`tampered_body`, `tampered_id`, `expired`, `wrong_audience`,
+  `missing_envelope`, `unauthorized_path`) assert the inner fileserver was **never
+  reached** — the sidecar refused the request before it was spawned.
+- `replay` asserts the inner server **was** reached, because the **first**
+  (accepted) send legitimately reached it; the security property is that the
   **second**, replayed send is denied.
-- Case 7 is **not** a denial: a caller-smuggled `.verified` block is silently
-  stripped and replaced by the sidecar's own verified context, and the response
-  still verifies under the server (`verifier=did:example:server-1`).
-- Cases 9 and 10 reach the inner server (the request was legitimate) but the
-  **client** refuses the response binding — a wrong-hash binding and a corrupted
-  response signature, respectively.
+- `caller_verified` is **not** a denial: a caller-smuggled `.verified` block is
+  silently stripped and replaced by the sidecar's own verified context, and the
+  response still verifies under the server (`verifier=did:example:server-1`).
+- `wrong_response_hash` and `bad_response_signature` reach the inner server (the
+  request was legitimate) but the **client** refuses the response binding — a
+  wrong-hash binding and a corrupted response signature, respectively.
 
 ## Troubleshooting
 
 - **`//...` label errors / target not found.** Make sure you are at the
   repository root and use `//mcps-demo:...` labels.
-- **`INNER_FILESERVER_BIN must be set ...` or `cannot locate runfile ...`.** The
-  binaries resolve the inner server and fixture from runfiles env vars stamped
-  by the BUILD target. Always launch via `bazel run` (not by executing the built
-  binary directly), so Bazel provides the runfiles and env vars.
+- **`cannot locate the inner 'mcps-demo-fileserver' binary` (Cargo).** The demo
+  resolves the inner server from the Cargo `target/<profile>/` output. Build it
+  first with `cargo build --workspace --bins` (or just run
+  `./scripts/demo-local.sh`, which builds before running). Under Bazel the
+  runfiles env vars are stamped automatically; under Cargo no env vars are needed.
 - **`demo_positive FAILED: ...` / `demo_negative FAILED: ...`.** The demos fail
   loudly by design. The message names the failing step (e.g. a verification or
   authorization error); treat it as a real signal, not noise.

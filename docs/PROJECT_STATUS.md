@@ -18,33 +18,51 @@ This claim is bounded and should not be broadened without additional implementat
 
 ## Demonstrated capabilities
 
-The current demonstration package should prove:
+The current demonstration and live-validation package proves:
 
-- HostSession signs outbound requests;
-- client transport verifies server certificate and identity;
-- mTLS connection is established to `mcps-proxy`;
-- `mcps-proxy` verifies object signatures;
-- freshness/replay checks are enforced;
-- delegated authorization is evaluated before dispatch;
-- caller-supplied verified context is stripped;
-- sidecar-owned verified context is injected;
-- a persistent inner MCP-style server can handle multiple requests through one process;
-- denied requests do not reach the inner server;
-- responses are signed;
-- HostSession verifies response signature and request-hash binding.
+### Single-node Rust-native end-to-end path
+
+- HostSession signs outbound requests; client transport verifies server
+  certificate and identity; mTLS to `mcps-proxy`;
+- `mcps-proxy` verifies object signatures, freshness/replay, and delegated
+  authorization before dispatch;
+- caller-supplied verified context is stripped, sidecar-owned context injected;
+- a persistent inner MCP server handles multiple requests; denied requests never
+  reach it; responses are signed and bound to the request hash; HostSession
+  verifies the response signature.
+
+### Live Google Cloud KMS validation (v0.5.1)
+
+- **Object signing against real Cloud KMS** (`EC_SIGN_ED25519`): signatures
+  produced by a live `asymmetricSign` and verified by `mcps-core`; the private
+  key never leaves KMS (`getPublicKey`/`asymmetricSign` only).
+- **Delegated TLS server-signing against real Cloud KMS**: a fully-validating
+  rustls mTLS handshake completes only because a live KMS `asymmetricSign`
+  produced the `CertificateVerify`; the TLS private key lives entirely in KMS
+  (leaf minted over the KMS public key).
+- **Fail-closed negative lanes**: wrong-identity, bad-token, non-Ed25519 key,
+  leaf-not-bound-to-KMS-key, and untrusted-client cases all reject with the
+  correct frozen wire codes.
+- One-command reproduction harness (`docs/security/gcloud-kms-validation.sh`).
 
 ## Not yet claimed
 
 MCP-S does not currently claim:
 
-- horizontally scaled replay protection;
-- HSM/KMS-backed key custody;
-- full certificate revocation through CRL/OCSP;
-- reverse-proxy mTLS provider support;
-- OS-level filesystem/network containment for wrapped servers;
-- signed tool manifest enforcement;
 - official MCP extension status;
-- offline-hermetic build reproducibility.
+- universal enterprise authorization (MCP-S binds authorization decisions; it
+  does not interpret or replace an enterprise authz system);
+- an EMA (enterprise-managed authorization) implementation;
+- portable audit receipts;
+- full SIEM / Security Command Center integration (the audit taxonomy is frozen
+  and SCC-mappable, but the integration itself is unbuilt — Stages 2–3 of the
+  Google validation plan);
+- broad multi-cloud live validation: GCP Cloud KMS is live-proven; the AWS KMS
+  adapter is shipped but **not** yet live-proven, so multi-cloud custody is not
+  claimed until AWS is also live-proven;
+- horizontally scaled replay protection, full CRL/OCSP revocation, OS-level
+  sandboxing of wrapped servers, and signed tool-manifest enforcement (gated on
+  the high-assurance cargo features — see the README deployment profiles).
 
 ## Proposal readiness
 

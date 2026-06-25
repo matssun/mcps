@@ -14,6 +14,7 @@ nt_rust_library(
         "src/client.rs",
         "src/demo_authorization.rs",
         "src/demo_fixtures.rs",
+        "src/demo_paths.rs",
         "src/demo_proxy.rs",
         "src/e2e_flow.rs",
         "src/e2e_persistent_flow.rs",

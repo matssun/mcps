@@ -22,6 +22,7 @@
 pub mod client;
 pub mod demo_authorization;
 pub mod demo_fixtures;
+pub mod demo_paths;
 pub mod demo_proxy;
 pub mod e2e_flow;
 pub mod e2e_persistent_flow;
@@ -54,6 +55,8 @@ pub use e2e_persistent_flow::PERSISTENT_ON_BEHALF_OF;
 pub use e2e_persistent_flow::TOOL_ECHO;
 pub use e2e_persistent_flow::TOOL_LIST_ITEMS;
 pub use e2e_persistent_flow::TOOL_RESET_ITEMS;
+pub use demo_paths::demo_inner_binary;
+pub use demo_paths::demo_root_dir;
 pub use demo_fixtures::DemoFixtureFiles;
 pub use demo_fixtures::DemoFixtureSpec;
 pub use demo_fixtures::DemoFixtures;

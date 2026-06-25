@@ -15,23 +15,25 @@
 //!   -> HostSession (client) verifies the response vs the STORED request hash
 //! ```
 //!
-//! Run it with:
+//! Run it with either build system:
 //!
 //! ```sh
 //! bazel run //mcps-demo:demo_positive
+//! # or, after `cargo build --workspace --bins`:
+//! cargo run -p mcps-demo --bin demo_positive
 //! ```
 //!
-//! (from `components/mcps`). The inner `mcps-demo-fileserver` binary and the
-//! committed `demo_root/` fixture are delivered via Bazel runfiles; the bin
-//! resolves them from the `INNER_FILESERVER_BIN` / `DEMO_ROOT_README` env vars
-//! the BUILD target stamps with `$(rlocationpath ...)`. Nothing is hardcoded and
-//! the demo never holds a private key outside the signer it constructs.
+//! The inner `mcps-demo-fileserver` binary and the committed `demo_root/` fixture
+//! are resolved by [`mcps_demo::demo_paths`]: under Bazel from the
+//! `INNER_FILESERVER_BIN` / `DEMO_ROOT_README` runfiles env vars; under Cargo from
+//! the `target/<profile>/` build output and the workspace-relative fixture — so no
+//! env setup is required for the Cargo quickstart. Nothing is hardcoded and the
+//! demo never holds a private key outside the signer it constructs.
 //!
 //! This is a DEMO entry point: it fails LOUDLY (non-zero exit, clear message) on
 //! any error rather than masking it. The library paths it drives never panic on
 //! bad input — they fail closed with a JSON-RPC error, which the demo surfaces.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -41,7 +43,9 @@ use mcps_core::InMemoryTrustResolver;
 use mcps_core::SigningKey;
 use mcps_core::VerificationConfig;
 use mcps_demo::build_demo_proxy_with_policy;
+use mcps_demo::demo_inner_binary;
 use mcps_demo::demo_policy_evaluator;
+use mcps_demo::demo_root_dir;
 use mcps_demo::demo_revocation_source;
 use mcps_demo::mint_demo_grant;
 use mcps_demo::DemoGrant;
@@ -112,46 +116,12 @@ fn demo_grant() -> DemoGrant {
     mint_demo_grant(&spec, &issuer_key(), ISSUER_KEY_ID).expect("mint demo grant")
 }
 
-/// Resolve a runfiles-relative path delivered via an `$(rlocationpath ...)` env
-/// var against the runfiles roots, returning the first that exists.
-fn resolve_runfile(env_key: &str) -> Result<PathBuf, String> {
-    let rel = std::env::var(env_key).map_err(|_| {
-        format!("{env_key} must be set by the BUILD target (run via `bazel run`)")
-    })?;
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for root_key in ["TEST_SRCDIR", "RUNFILES_DIR"] {
-        if let Ok(root) = std::env::var(root_key) {
-            candidates.push(PathBuf::from(&root).join(&rel));
-        }
-    }
-    // Under `bazel run` on this workspace, no runfiles env var is set but the cwd
-    // IS the runfiles `_main` dir, so the runfiles root is its PARENT. Try the cwd
-    // and its parent as roots before the bare relative path.
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join(&rel));
-        if let Some(parent) = cwd.parent() {
-            candidates.push(parent.join(&rel));
-        }
-    }
-    candidates.push(PathBuf::from(&rel));
-    candidates
-        .into_iter()
-        .find(|c| c.exists())
-        .ok_or_else(|| format!("cannot locate runfile via {env_key}='{rel}'"))
-}
-
 fn inner_binary() -> Result<String, String> {
-    Ok(resolve_runfile("INNER_FILESERVER_BIN")?
-        .to_string_lossy()
-        .into_owned())
+    Ok(demo_inner_binary()?.to_string_lossy().into_owned())
 }
 
 fn demo_root() -> Result<String, String> {
-    Ok(resolve_runfile("DEMO_ROOT_README")?
-        .parent()
-        .ok_or("readme.txt has no parent")?
-        .to_string_lossy()
-        .into_owned())
+    Ok(demo_root_dir()?.to_string_lossy().into_owned())
 }
 
 /// A capturing lifecycle sink so the demo can report which inner / proxy

@@ -12,23 +12,25 @@
 //! ...
 //! ```
 //!
-//! Run it with:
+//! Run it with either build system:
 //!
 //! ```sh
 //! bazel run //mcps-demo:demo_negative
+//! # or, after `cargo build --workspace --bins`:
+//! cargo run -p mcps-demo --bin demo_negative
 //! ```
 //!
-//! (from `components/mcps`). The inner `mcps-demo-fileserver` binary and the
-//! committed `demo_root/` fixture are delivered via Bazel runfiles; the bin
-//! resolves them from the `INNER_FILESERVER_BIN` / `DEMO_ROOT_README` env vars the
-//! BUILD target stamps with `$(rlocationpath ...)`. Nothing is hardcoded.
+//! The inner `mcps-demo-fileserver` binary and the committed `demo_root/` fixture
+//! are resolved by [`mcps_demo::demo_paths`]: under Bazel from the
+//! `INNER_FILESERVER_BIN` / `DEMO_ROOT_README` runfiles env vars; under Cargo from
+//! the `target/<profile>/` build output and the workspace-relative fixture — so no
+//! env setup is required for the Cargo quickstart. Nothing is hardcoded.
 //!
 //! This is a DEMO entry point: it fails LOUDLY (non-zero exit, clear message) if
 //! ANY case is not rejected with the EXPECTED reason — a missing rejection is a
 //! security regression, not a quiet pass. The library paths it drives never panic
 //! on bad input; they fail closed with a JSON-RPC error, surfaced here.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -40,7 +42,9 @@ use mcps_core::REQUEST_META_KEY;
 use mcps_core::RESPONSE_META_KEY;
 use mcps_core::VERIFIED_META_KEY;
 use mcps_demo::build_demo_proxy_with_policy;
+use mcps_demo::demo_inner_binary;
 use mcps_demo::demo_policy_evaluator;
+use mcps_demo::demo_root_dir;
 use mcps_demo::demo_revocation_source;
 use mcps_demo::mint_demo_grant;
 use mcps_demo::DemoGrant;
@@ -125,41 +129,12 @@ fn demo_grant() -> DemoGrant {
     mint_demo_grant(&spec, &issuer_key(), ISSUER_KEY_ID).expect("mint demo grant")
 }
 
-fn resolve_runfile(env_key: &str) -> Result<PathBuf, String> {
-    let rel = std::env::var(env_key).map_err(|_| {
-        format!("{env_key} must be set by the BUILD target (run via `bazel run`)")
-    })?;
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for root_key in ["TEST_SRCDIR", "RUNFILES_DIR"] {
-        if let Ok(root) = std::env::var(root_key) {
-            candidates.push(PathBuf::from(&root).join(&rel));
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join(&rel));
-        if let Some(parent) = cwd.parent() {
-            candidates.push(parent.join(&rel));
-        }
-    }
-    candidates.push(PathBuf::from(&rel));
-    candidates
-        .into_iter()
-        .find(|c| c.exists())
-        .ok_or_else(|| format!("cannot locate runfile via {env_key}='{rel}'"))
-}
-
 fn inner_binary() -> Result<String, String> {
-    Ok(resolve_runfile("INNER_FILESERVER_BIN")?
-        .to_string_lossy()
-        .into_owned())
+    Ok(demo_inner_binary()?.to_string_lossy().into_owned())
 }
 
 fn demo_root() -> Result<String, String> {
-    Ok(resolve_runfile("DEMO_ROOT_README")?
-        .parent()
-        .ok_or("readme.txt has no parent")?
-        .to_string_lossy()
-        .into_owned())
+    Ok(demo_root_dir()?.to_string_lossy().into_owned())
 }
 
 #[derive(Default)]
@@ -224,22 +199,28 @@ fn denial_reason(response: &[u8]) -> Result<Option<String>, String> {
     }
 }
 
-/// Print + check one denial line. Fails loudly if the observed reason does not
-/// equal the expected one, or if the inner-reach expectation is violated.
+/// Print a category header for the grouped output.
+fn group(title: &str) {
+    println!("\n{title}:");
+}
+
+/// Print + check one grouped `PASS` line. Fails loudly if the observed reason
+/// does not equal the expected one, or if the inner-reach expectation is
+/// violated — the printed line is cosmetic; the assertions are the contract.
 fn report(
-    case: &str,
+    label: &str,
     expected: &str,
     observed: &str,
     inner_reached: bool,
     expect_inner_reached: bool,
 ) -> Result<(), String> {
-    println!("denial case={case:<24} reason={observed:<36} inner_reached={inner_reached}");
+    println!("  PASS {label:<24} {observed}");
     if observed != expected {
-        return Err(format!("case {case}: expected reason {expected}, observed {observed}"));
+        return Err(format!("case {label}: expected reason {expected}, observed {observed}"));
     }
     if inner_reached != expect_inner_reached {
         return Err(format!(
-            "case {case}: expected inner_reached={expect_inner_reached}, observed {inner_reached}"
+            "case {label}: expected inner_reached={expect_inner_reached}, observed {inner_reached}"
         ));
     }
     Ok(())
@@ -248,7 +229,7 @@ fn report(
 fn main() -> ExitCode {
     match run() {
         Ok(()) => {
-            println!("OK: all 10 negative cases rejected with the expected mcps.* reason");
+            println!("\nOK: all 10 fail-closed cases rejected with the expected mcps.* reason");
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -265,6 +246,10 @@ fn run() -> Result<(), String> {
     let grant = demo_grant();
     let auth_hash = grant.authorization_hash().map_err(|e| format!("authorization_hash: {e:?}"))?;
 
+    println!("MCP-S local fail-closed paths — each case must be rejected with its frozen mcps.* reason:");
+
+    group("Request integrity");
+
     // Case 1: tampered request body.
     {
         let sink = Arc::new(CapturingSink::default());
@@ -279,7 +264,7 @@ fn run() -> Result<(), String> {
         let tampered = serde_json::to_vec(&request).map_err(|e| format!("serialize: {e}"))?;
         let response = proxy.handle(&tampered, now());
         let reason = denial_reason(&response)?.ok_or("case 1: expected a denial")?;
-        report("1_tampered_body", McpsError::InvalidSignature.wire_code(), &reason, sink.inner_was_reached(), false)?;
+        report("tampered_body", McpsError::InvalidSignature.wire_code(), &reason, sink.inner_was_reached(), false)?;
     }
 
     // Case 2: tampered JSON-RPC id.
@@ -296,8 +281,10 @@ fn run() -> Result<(), String> {
         let tampered = serde_json::to_vec(&request).map_err(|e| format!("serialize: {e}"))?;
         let response = proxy.handle(&tampered, now());
         let reason = denial_reason(&response)?.ok_or("case 2: expected a denial")?;
-        report("2_tampered_id", McpsError::InvalidSignature.wire_code(), &reason, sink.inner_was_reached(), false)?;
+        report("tampered_id", McpsError::InvalidSignature.wire_code(), &reason, sink.inner_was_reached(), false)?;
     }
+
+    group("Freshness / replay");
 
     // Case 3: replayed request (first send dispatches; second is replay).
     {
@@ -316,7 +303,7 @@ fn run() -> Result<(), String> {
         let reason = denial_reason(&second)?.ok_or("case 3: expected a replay denial")?;
         // The inner WAS reached by the (accepted) first send; the replay verdict
         // on the second send is the security property.
-        report("3_replay", McpsError::ReplayDetected.wire_code(), &reason, sink.inner_was_reached(), true)?;
+        report("replay", McpsError::ReplayDetected.wire_code(), &reason, sink.inner_was_reached(), true)?;
     }
 
     // Case 4: expired request (verified far past its freshness window).
@@ -330,8 +317,10 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("sign: {e:?}"))?;
         let response = proxy.handle(&signed, NOW_UNIX + 10 * 3600);
         let reason = denial_reason(&response)?.ok_or("case 4: expected a denial")?;
-        report("4_expired", McpsError::ExpiredRequest.wire_code(), &reason, sink.inner_was_reached(), false)?;
+        report("expired", McpsError::ExpiredRequest.wire_code(), &reason, sink.inner_was_reached(), false)?;
     }
+
+    group("Routing / binding");
 
     // Case 5: wrong audience.
     {
@@ -344,7 +333,7 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("sign: {e:?}"))?;
         let response = proxy.handle(&signed, now());
         let reason = denial_reason(&response)?.ok_or("case 5: expected a denial")?;
-        report("5_wrong_audience", McpsError::InvalidAudience.wire_code(), &reason, sink.inner_was_reached(), false)?;
+        report("wrong_audience", McpsError::InvalidAudience.wire_code(), &reason, sink.inner_was_reached(), false)?;
     }
 
     // Case 6: missing MCP-S request envelope.
@@ -364,8 +353,10 @@ fn run() -> Result<(), String> {
         let stripped = serde_json::to_vec(&request).map_err(|e| format!("serialize: {e}"))?;
         let response = proxy.handle(&stripped, now());
         let reason = denial_reason(&response)?.ok_or("case 6: expected a denial")?;
-        report("6_missing_envelope", McpsError::MissingEnvelope.wire_code(), &reason, sink.inner_was_reached(), false)?;
+        report("missing_envelope", McpsError::MissingEnvelope.wire_code(), &reason, sink.inner_was_reached(), false)?;
     }
+
+    group("Verified context");
 
     // Case 7: caller-supplied `.verified` is stripped + replaced (NOT a denial:
     // the request still authorizes; the proxy's sidecar context replaces the
@@ -399,10 +390,12 @@ fn run() -> Result<(), String> {
             return Err("case 7: sidecar did not replace the impostor .verified".to_string());
         }
         println!(
-            "denial case={:<24} reason={:<36} inner_reached={} (impostor .verified stripped; verifier={})",
-            "7_caller_verified", "stripped+replaced", sink.inner_was_reached(), verified.server_signer(),
+            "  PASS {:<24} {} (impostor .verified stripped; verifier={})",
+            "caller_verified", "stripped+replaced", verified.server_signer(),
         );
     }
+
+    group("Authorization");
 
     // Case 8: valid signature, failed Phase 5 authorization (unauthorized path).
     {
@@ -415,8 +408,10 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("sign: {e:?}"))?;
         let response = proxy.handle(&signed, now());
         let reason = denial_reason(&response)?.ok_or("case 8: expected a denial")?;
-        report("8_unauthorized", "mcps.authorization_scope_denied", &reason, sink.inner_was_reached(), false)?;
+        report("unauthorized_path", "mcps.authorization_scope_denied", &reason, sink.inner_was_reached(), false)?;
     }
+
+    group("Response binding");
 
     // Case 9: wrong response hash — the HostSession client refuses the binding.
     {
@@ -451,7 +446,7 @@ fn run() -> Result<(), String> {
             .verify_response(&response_b, &server_resolver())
             .err()
             .ok_or("case 9: client must reject the wrong-hash binding")?;
-        report("9_wrong_response_hash", McpsError::ResponseHashMismatch.wire_code(), err.wire_code(), sink.inner_was_reached(), true)?;
+        report("wrong_response_hash", McpsError::ResponseHashMismatch.wire_code(), err.wire_code(), sink.inner_was_reached(), true)?;
     }
 
     // Case 10: invalid response signature — the HostSession client refuses it.
@@ -481,7 +476,7 @@ fn run() -> Result<(), String> {
             .verify_response(&corrupted, &server_resolver())
             .err()
             .ok_or("case 10: client must reject the invalid response signature")?;
-        report("10_bad_response_signature", McpsError::ResponseSigInvalid.wire_code(), err.wire_code(), sink.inner_was_reached(), true)?;
+        report("bad_response_signature", McpsError::ResponseSigInvalid.wire_code(), err.wire_code(), sink.inner_was_reached(), true)?;
     }
 
     Ok(())

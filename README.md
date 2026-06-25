@@ -2,6 +2,26 @@
 
 # MCP-S
 
+## Why should I care?
+
+**Problem.** An MCP tool call crosses a trust boundary as plain JSON-RPC. Nothing
+stops it being forged, replayed, stripped of its authorization context, or
+answered by a tampered response.
+
+**MCP-S answer.** MCP-S protects *individual MCP calls* with object-level
+signatures, freshness, replay protection, delegated-authorization binding,
+response binding, and sidecar-injected verified context — proven on a single-node
+Rust-native path and against live Google Cloud KMS (v0.5.1).
+
+**Non-goals.** MCP-S is **not** OAuth, **not** EMA, **not** sandboxing, **not** a
+full audit-receipt format. It composes with those layers rather than replacing
+them.
+
+See [`docs/MCP-S-IN-ONE-PAGE.md`](docs/MCP-S-IN-ONE-PAGE.md) for the one-page
+overview.
+
+## Overview
+
 MCP-S is an experimental third-party security extension proposal for the Model Context Protocol (MCP).
 
 It provides a reference implementation and conformance package for protecting MCP tool calls with:
@@ -14,6 +34,25 @@ It provides a reference implementation and conformance package for protecting MC
 - signed response verification by the host/client side.
 
 MCP-S is not part of the official MCP specification unless and until it is accepted through the MCP governance and SEP process.
+
+## Quickstart — see MCP-S fail closed
+
+Run the single-node demo and watch the proxy accept exactly one valid signed
+call and fail closed on ten tampered, stale, replayed, mis-routed, unauthorized,
+or unbound calls — real v0.5.1 behavior, no cloud credentials:
+
+```sh
+./scripts/demo-local.sh
+```
+
+Expected final line: `OK: MCP-S local demo completed`. The two bins also run
+directly under Cargo (`cargo run -p mcps-demo --bin demo_positive` /
+`demo_negative`, after `cargo build --workspace --bins`) or Bazel
+(`bazel run //mcps-demo:demo_negative`) with no env setup.
+
+Full walkthrough, the grouped fail-closed output, and what each case proves:
+[`docs/quickstart-local.md`](docs/quickstart-local.md). For the live Google Cloud
+KMS key-custody path (optional, separate): [`docs/quickstart-gcp-kms.md`](docs/quickstart-gcp-kms.md).
 
 ## Project status
 
@@ -216,8 +255,39 @@ docs/RELEASE_CHECKLIST.md  Steps run before tagging a release.
 docs/*-guide.md            Operator runbooks (sidecar, host, transport, conformance, dogfood).
 ```
 
+## For security reviewers
+
+If you are evaluating MCP-S, read these in order — they route through the same
+materials the [upstream-proposal package](docs/UPSTREAM_PROPOSAL_PROCESS.md)
+requires (motivation/threat model, security boundary, envelope and signature
+rules, replay/freshness model, authorization profile, transport hardening,
+conformance, reference implementation, demos, and non-goals):
+
+1. **One page** — [`docs/MCP-S-IN-ONE-PAGE.md`](docs/MCP-S-IN-ONE-PAGE.md):
+   what it is, the threat, where it sits, what v0.5.1 proves, what it does not claim.
+2. **Security boundary** — [`docs/spec/security-boundary.md`](docs/spec/security-boundary.md):
+   what MCP-S protects and what it explicitly does not.
+3. **v0.5 claim matrix** — [`docs/spec/v0.5-claim-matrix.md`](docs/spec/v0.5-claim-matrix.md):
+   every reviewer-facing claim, each traceable to a green test.
+4. **GCP KMS validation** — [`docs/quickstart-gcp-kms.md`](docs/quickstart-gcp-kms.md)
+   (front door) and [`docs/security/google-validation-plan.md`](docs/security/google-validation-plan.md)
+   (full plan): the live enterprise key-custody proof.
+5. **Conformance guide** — [`docs/conformance-guide.md`](docs/conformance-guide.md):
+   the black-box conformance harness and vectors.
+6. **EMA composition** — [`docs/spec/ema-composition.md`](docs/spec/ema-composition.md):
+   how MCP-S would compose with Enterprise-Managed Authorization (a **proposed**
+   design note — EMA is not implemented or demoed in v0.5.1).
+7. **Run it** — [`docs/quickstart-local.md`](docs/quickstart-local.md): the
+   local fail-closed demo (`./scripts/demo-local.sh`), no cloud credentials.
+
 ## Documentation index
 
+- **One-page overview:** [`docs/MCP-S-IN-ONE-PAGE.md`](docs/MCP-S-IN-ONE-PAGE.md) —
+  what MCP-S is, the threat it addresses, where it sits relative to EMA/OAuth, and
+  what v0.5.1 proves.
+- **Quickstarts:** [`docs/quickstart-local.md`](docs/quickstart-local.md)
+  (local fail-closed demo, no cloud) and
+  [`docs/quickstart-gcp-kms.md`](docs/quickstart-gcp-kms.md) (live GCP Cloud KMS).
 - **Releases:** [`CHANGELOG.md`](CHANGELOG.md).
 - **Architecture decisions:** [`docs/adr/`](docs/adr/) — start with
   [ADR-MCPS-001](docs/adr/adr-mcps-001.md) (trust model) and
