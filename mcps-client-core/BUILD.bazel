@@ -1,0 +1,34 @@
+load("//bazel:defs.bzl", "nt_rust_library", "nt_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# MCPS-40 (ADR-MCPS-044 §mcps-client-core): the client-side shared seam consumed
+# by the local proxy and the SDK. Pure library — depends only on the verification
+# crate plus serde_json (request construction). No networking/async/fs: those are
+# the mode-specific layers ABOVE this seam.
+nt_rust_library(
+    name = "mcps_client_core",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "mcps_client_core",
+    edition = "2021",
+    deps = [
+        "//mcps-core:mcps_core",
+        "@crates_mcps//:serde_json",
+    ],
+)
+
+# An ordinary MCP request signed by the client core verifies against the
+# server-side mcps-core draft-02 verifier; the client request_hash equals the
+# verifier's response-binding handle (the MCPS-40 cross-side oracle).
+nt_rust_test(
+    name = "signed_request_vectors_test",
+    srcs = ["tests/signed_request_vectors_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_client_core",
+        "//mcps-core:mcps_core",
+        "@crates_mcps//:serde_json",
+    ],
+)
