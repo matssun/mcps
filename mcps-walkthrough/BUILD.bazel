@@ -66,3 +66,22 @@ nt_rust_test(
         "@crates_mcps//:serde_json",
     ],
 )
+
+# T3 — "External users": `--transport-binding exact` mTLS identity binding. A
+# matching identity passes and is recorded in the inner's own received-log; the
+# SAME mismatched cert passes with binding off but is denied-before-dispatch with
+# `exact` (cross-process proof: absent from the inner's record, zero inner
+# spawns); a wrong expected server name fails closed with no inner data.
+nt_rust_test(
+    name = "t3_external_users_transport_binding",
+    srcs = ["tests/t3_external_users_transport_binding.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    data = _TIER_DATA,
+    edition = "2021",
+    env = _TIER_ENV,
+    deps = [
+        ":mcps_walkthrough",
+        "@crates_mcps//:serde_json",
+    ],
+)

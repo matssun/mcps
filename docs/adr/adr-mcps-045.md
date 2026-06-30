@@ -108,10 +108,20 @@ the live-cloud script. The ladder maps onto the phases:
     **mTLS-on-loopback** throughout (not plain loopback); the lower tiers
     deliberately leave transport-identity *binding* off (`--transport-binding
     none`) — message-level security is transport-independent.
-  - **3d** — **T3**: `--transport-binding exact` + transport/protocol negatives
-    (mismatched client cert, wrong server name, downgrade) + the `--received-log`
-    cross-process confirmation (a denied request absent from the inner's own
-    record, an allowed one present).
+  - **3d** — **T3** (DONE): `--transport-binding exact` + a server-name negative +
+    the `--received-log` cross-process confirmation. The tier file
+    (`t3_external_users_transport_binding.rs`, 4 tests) proves: a matching identity
+    passes `exact` and is recorded in the inner's own log (one inner spawn); the
+    SAME mismatched client cert passes with binding OFF but is denied-before-
+    dispatch under `exact` — isolating the binding as the cause — with the denied
+    call absent from the inner's record and ZERO inner spawns; a wrong expected
+    `--server-name` fails closed with no inner data. **Wire-honesty discovery:** at
+    the four-hop boundary the client cannot surface the remote's *reason*
+    (`transport_binding_failed` rides an UNSIGNED error body the client rightly
+    distrusts → it reports a generic fail-closed verdict). So T3 proves the
+    OUTCOME (denied before dispatch, cross-process); the server-side reason token
+    stays pinned by the in-process `mcps-proxy` suite. Downgrade negatives live in
+    `proxy_version_policy_test`, not re-proven here.
 - **Phase 4** — client-side GCP KMS signer in `mcps-client-core` + live lane →
   **T4**.
 - **Phase 5** — sanitized two-version model (real `work/` script gitignored; a
