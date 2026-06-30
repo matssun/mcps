@@ -1,0 +1,46 @@
+# MCP-S Python SDK — native core binding (issue #199, ADR-MCPS-044 §SDK
+# wrap-or-fork rule; Python first).
+#
+# This PyO3 layer exposes the AUDITED `mcps-client-core` signing / verification /
+# enforcement logic to Python, so the Python SDK shares ONE implementation of the
+# canonical signed preimage with the Rust proxy — no parallel reimplementation
+# (the one thing CONTEXT.md forbids).
+#
+# It declares its OWN empty `[workspace]` table so it is a SEPARATE Cargo
+# workspace, deliberately excluded from the root workspace: a PyO3 `cdylib` built
+# by maturin must not perturb `cargo build` / `bazel test //...` or the mcps-core
+# purity story. It still path-depends on the in-repo crates.
+[package]
+name = "mcps-python-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Mats Sundvall"]
+description = "PyO3 binding exposing mcps-client-core to the MCP-S Python SDK (transport adapter; ADR-MCPS-044)."
+publish = false
+
+# Nested-but-independent: an empty [workspace] makes this its own workspace root,
+# so the parent workspace ignores it (no edit to the root Cargo.toml needed).
+[workspace]
+
+[lib]
+name = "mcps_sdk_core"
+# cdylib: the Python extension module (maturin renames the artifact to the
+# `module-name` in pyproject.toml, `mcps_sdk._core`). rlib: lets `cargo run
+# --example` / `cargo test` link this crate to generate the parity golden vector.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The audited client seam + the pure primitives. The whole point of the binding:
+# one source of truth for the signed preimage, shared with mcps-client-proxy.
+mcps-client-core = { path = "../../mcps-client-core" }
+mcps-core = { path = "../../mcps-core" }
+serde_json = "1.0"
+
+# abi3-py39: build ONE wheel that works on CPython >= 3.9 (stable ABI), so
+# `pip install` needs no Rust toolchain. `extension-module` is NOT enabled here:
+# it is added only for the wheel build via `[tool.maturin] features` below (the
+# recommended pyo3 pattern), so `cargo test`/`cargo run --example` can still link
+# against libpython to generate the parity oracle.
+pyo3 = { version = "0.23", features = ["abi3-py39"] }

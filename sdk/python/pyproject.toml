@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "mcps-sdk"
+version = "0.1.0"
+description = "MCP-S Python SDK — runtime-evidence security (signed requests, verified responses) for the MCP Python SDK, via a transport adapter over the audited mcps-client-core."
+# mcp (the upstream SDK) requires >=3.10; match its floor.
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Mats Sundvall" }]
+readme = "README.md"
+# No hard runtime deps yet. `mcp` is NOT pinned here on purpose: the spike found
+# it mid-refactor (v1 session layer removed, types moved to `mcp_types`), so it
+# lives in the `mcp` extra below until the transport seam is validated (#199).
+# The native core (mcps_sdk._core) needs no Python deps.
+dependencies = []
+
+[project.optional-dependencies]
+# The upstream MCP Python SDK — required to actually open a session, not to load
+# the core. TODO(#199): pin to an EXACT version once the transport seam is stable.
+mcp = ["mcp>=1.16"]
+dev = ["pytest>=8", "maturin>=1.5,<2.0"]
+
+[tool.maturin]
+# Mixed Rust/Python layout: Python sources under python/, native ext built from
+# the Cargo crate and installed as `mcps_sdk._core`.
+python-source = "python"
+module-name = "mcps_sdk._core"
+features = ["pyo3/extension-module"]
