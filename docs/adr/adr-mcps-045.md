@@ -39,12 +39,22 @@ each with a one-screen "what this proves" note — not a wall of framework prose
 
 ### D1 — Server PEP gains draft-02 on the wire via the existing dispatcher
 
-`mcps-proxy` calls `verify_request_dispatch` with `ExpectedVersionPolicy`
-resolved from operator config (`Draft02Only` recommended; `Draft01AndDraft02`
-for migration) instead of the hardcoded draft-01 `verify_request`. The
+**Project direction:** nothing here is shipped — the repo is a public
+work-in-progress driving toward a standards proposal. Internally we develop
+against **draft-02 only**; draft-01 is legacy, slated for eventual retirement,
+and gains no new code.
+
+`mcps-proxy` therefore calls `verify_request_dispatch` with
+`ExpectedVersionPolicy::Draft02Only` instead of the hardcoded draft-01
+`verify_request`. No migration posture is wired into the new path. The
 `VerifiedContext` builder (`proxy.rs:434`) stops forcing `draft01_hash()` and
 accepts the draft-02 typed `authorization_binding`. This is the already-planned
 MCPS-37 work; it reuses tested Core code.
+
+The pre-existing draft-01 demo (`mcps-host` + `demo_e2e_test.rs`) is left
+untouched for now and is **not** a constraint on the new path; it is migrated to
+draft-02 or retired as a later cleanup, not preserved as a dual-version
+requirement.
 
 **Rejected — option (a):** teaching `mcps-client-core` to also sign draft-01.
 It fights the deliberately draft-02-only client seam (CONTEXT glossary), would
