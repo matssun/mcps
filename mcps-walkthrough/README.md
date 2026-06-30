@@ -32,17 +32,21 @@ without binding the transport identity (that's a later rung).
 | **T1** Real tools, fail closed | …maturing | real `read`/`write`/`stat`/`list` over the signed channel + a fail-closed input | `cargo test -p mcps-walkthrough --test t1_real_tools_fail_closed` |
 | **T2** Internal roles | Small company, internal | scoped authorization — reader vs admin; a reader's write is **denied before dispatch** | `cargo test -p mcps-demo --test demo_scope_test` |
 | **T3** External users | Small company, external | mTLS identity binding (`--transport-binding exact`) + a server-name negative + the cross-process received-log deny proof | `cargo test -p mcps-walkthrough --test t3_external_users_transport_binding` |
-| **T4** Enterprise key custody | Larger enterprise | client + server signing keys in cloud KMS (non-exporting) | `./scripts/test-gcp-cloud.sh.example` (copy to `work/`, fill in your project) |
+| **T4** Enterprise key custody | Larger enterprise | client **and** server signing keys both non-exporting in cloud KMS — the full four-hop with cloud-held identities (`t4_enterprise_kms_custody`, live, `#[ignore]`) | `./scripts/test-gcp-cloud.sh.example` (copy to `work/`, fill in your project) |
 
 T0–T3 run offline with `cargo test`. T0, T1, and T3 run the real four-hop; T2 is
 currently demonstrated in-process in `mcps-demo` (`demo_scope_test`), with its
-four-hop variant to follow. T4's new capability — a non-exporting Cloud KMS
-**client** signer (`mcps-client-proxy-cli --key-source gcp-kms`, feature
-`gcp_kms`) — is proven offline against the unmodified `mcps-core` verifier
-(`cargo test -p mcps-client-proxy-cli --features gcp_kms`) and validated end to
-end against a live cloud project via the script above. A tracked-file leak guard
-(`cargo test -p mcps-walkthrough --test no_tracked_secrets`) keeps real project
-identifiers out of the repo.
+four-hop variant to follow. T4 is the INTEGRATED four-hop: the client request
+signer **and** the server response signer are both non-exporting Cloud KMS keys
+(two distinct keys), and the harness (`FourHop::launch_kms`) fetches both KMS
+public keys to wire trust before driving a real signed round-trip over the mTLS
+socket. It is live and `#[ignore]`d — run it from the script above with cloud
+credentials; it fails loudly if its configuration is absent. The two halves are
+also proven independently offline (the client signer against the unmodified
+`mcps-core` verifier, `cargo test -p mcps-client-proxy-cli --features gcp_kms`;
+the server object signing in `mcps-proxy`'s own live lane). A tracked-file leak
+guard (`cargo test -p mcps-walkthrough --test no_tracked_secrets`) keeps real
+project identifiers out of the repo.
 
 ## How a rung is built
 

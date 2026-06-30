@@ -199,6 +199,7 @@ fn a_wrong_expected_server_name_fails_closed_with_no_inner_data() {
         client_cert: ClientCert::Matching,
         received_log: None,
         server_name_override: Some("wrong.server.invalid".to_string()),
+        ..FourHopOptions::default()
     });
 
     let resp = hop.call(&tool_call(

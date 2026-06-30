@@ -114,3 +114,15 @@ cargo test -p mcps-proxy --features gcp_kms_keysource \
 MCPS_GCP_KEY_VERSION="$MCPS_GCP_KEY_VERSION_CLIENT" \
 cargo test -p mcps-client-proxy-cli --features gcp_kms \
   -- --ignored --nocapture
+
+# 5. INTEGRATED four-hop (ADR-MCPS-045 Tier T4 / #218): the client request signer
+#    AND the server response signer are BOTH in Cloud KMS (two distinct keys),
+#    over the real mTLS socket — the full four-hop with cloud-held identities.
+#    Build both CLIs WITH their KMS features so the walkthrough harness spawns
+#    KMS-capable binaries; the harness fetches both KMS public keys to wire trust
+#    (the client key into the server's --trust, the server key into the client's
+#    --server-pubkey). Uses MCPS_GCP_KEY_VERSION (server) + _CLIENT (client).
+cargo build -p mcps-client-proxy-cli --features gcp_kms
+cargo build -p mcps-proxy            --features gcp_kms_keysource
+cargo test -p mcps-walkthrough --features gcp_kms \
+  --test t4_enterprise_kms_custody -- --ignored --nocapture

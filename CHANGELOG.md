@@ -40,6 +40,12 @@ runnable tiers (ADR [045](docs/adr/adr-mcps-045.md)).
 - **Server Cloud KMS support (existing live lane).** `mcps-proxy --key-source
   GcpKms` continues to sign responses from a non-exporting Cloud KMS key
   (feature `gcp_kms_keysource`, live lanes).
+- **Integrated Cloud KMS four-hop — Tier T4 (live, #218).** A single live run
+  with the client request signer AND the server response signer BOTH non-exporting
+  in Cloud KMS (two distinct keys), over the real mTLS socket. The walkthrough
+  harness (`FourHop::launch_kms`, feature `gcp_kms`) fetches both KMS public keys
+  to wire trust and drives a signed round-trip end to end; `#[ignore]`d, run from
+  the cloud script (command 5). PROVEN against a real Cloud KMS project.
 - **Secret-hygiene guard.** A tracked-file leak guard
   (`mcps-walkthrough` `no_tracked_secrets`) asserts no real account/project
   identifier is committed; the live-cloud script stays gitignored behind a
@@ -50,12 +56,6 @@ runnable tiers (ADR [045](docs/adr/adr-mcps-045.md)).
 
 ### NOT yet claimed in v0.7
 
-- **A single integrated live-cloud four-hop with BOTH client and server signing
-  keys in Cloud KMS** over the real socket. Its two halves exist as separate
-  live lanes (client KMS signer + server KMS response signing), but they are not
-  yet stitched into one live four-hop run, which can only be validated with cloud
-  credentials. Tracked as the T4-integrated follow-up
-  (ADR [045](docs/adr/adr-mcps-045.md) Phase 4).
 - **Signed rejection reasons across the wire.** A client that fails closed cannot
   yet surface the remote's specific reason (e.g. `transport_binding_failed`) — it
   rides an unsigned error body the client rightly distrusts. The fix (signed

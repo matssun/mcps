@@ -16,6 +16,17 @@ mcps-client-core = { path = "../mcps-client-core" }
 mcps-core = { path = "../mcps-core" }
 mcps-test-paths = { path = "../mcps-test-paths" }
 serde_json = { workspace = true }
+# Tier T4 ONLY (optional): the live-cloud four-hop fetches both Ed25519 PUBLIC
+# keys from GCP Cloud KMS to wire trust (the client KMS key into the server's
+# `--trust`, the server KMS key into the client's `--server-pubkey`). It reuses
+# the SAME backend the proxy uses, so the public key the harness wires is exactly
+# the one that signs. OFF by default — a normal `cargo test` never pulls it.
+mcps-proxy = { path = "../mcps-proxy", optional = true }
+
+[features]
+# Build the Tier T4 integrated four-hop (`t4_enterprise_kms_custody`, #[ignore]):
+# pulls the proxy's Cloud-KMS backend for public-key fetch + trust wiring.
+gcp_kms = ["dep:mcps-proxy", "mcps-proxy/gcp_kms_keysource"]
 
 [lib]
 name = "mcps_walkthrough"

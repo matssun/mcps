@@ -76,6 +76,25 @@ pub enum ClientCert {
     Mismatched,
 }
 
+/// Where the object-layer SIGNING keys live: the fixture software seeds
+/// (default, T0..T3) or GCP Cloud KMS (T4 — both client request signer and server
+/// response signer non-exporting in the cloud). mTLS material is file-backed in
+/// both modes; only the object-signing identities move to KMS.
+#[derive(Debug, Clone)]
+pub enum SigningMode {
+    /// Software keys from the demo fixtures (the default for every offline tier).
+    Software,
+    /// Both object-signing keys held in GCP Cloud KMS, named by their key-version
+    /// resource paths. Compiled only under the `gcp_kms` feature (Tier T4).
+    #[cfg(feature = "gcp_kms")]
+    GcpKms {
+        /// The client request-signer's Cloud KMS key version.
+        client_key_version: String,
+        /// The server response-signer's Cloud KMS key version (a DISTINCT key).
+        server_key_version: String,
+    },
+}
+
 /// Knobs the tiers vary. Defaults give the T0/T1 posture.
 #[derive(Debug, Clone)]
 pub struct FourHopOptions {
@@ -90,6 +109,8 @@ pub struct FourHopOptions {
     /// Client-proxy `--server-name`; defaults to the fixture server cert SAN.
     /// Override to a WRONG name to exercise a server-identity negative.
     pub server_name_override: Option<String>,
+    /// Where the object-signing keys live (default [`SigningMode::Software`]).
+    pub signing: SigningMode,
 }
 
 impl Default for FourHopOptions {
@@ -99,8 +120,154 @@ impl Default for FourHopOptions {
             client_cert: ClientCert::Matching,
             received_log: None,
             server_name_override: None,
+            signing: SigningMode::Software,
         }
     }
+}
+
+/// The resolved object-layer signing identities + key-source CLI args for BOTH
+/// proxies, plus the public keys each side must trust. The software profile reads
+/// the fixture seeds; the KMS profile (T4) fetches both public keys from Cloud KMS
+/// and writes a `--trust` file binding the client's KMS key to its signer id.
+///
+/// This is the ONE place the two halves are kept consistent: the server signs
+/// responses as (`server_signer`, `server_key_id`) and the client trusts exactly
+/// that pair via `client_server_pubkey`; the client signs requests as
+/// (`client_signer_id`, `client_key_id`) and the server trusts exactly that pair
+/// via `server_trust_path`.
+struct SigningProfile {
+    // Server PEP — its own response-signing identity + the request signers it trusts.
+    server_signer: String,
+    server_key_id: String,
+    /// `--key-source ...` (+ `--signing-key-seed` or `--gcp-kms-key-version`).
+    server_key_source: Vec<String>,
+    /// Path to the `--trust` file listing accepted request signers.
+    server_trust_path: String,
+    // Client proxy — its own request-signing identity + the server key it trusts.
+    client_signer_id: String,
+    client_key_id: String,
+    /// `--signing-key-seed @path` (software) or `--key-source gcp-kms ...` (KMS).
+    client_key_source: Vec<String>,
+    /// The server response-signer public key the client verifies (`--server-pubkey`).
+    client_server_pubkey: String,
+    /// Holds the KMS `--trust` temp dir alive for the server's lifetime (`None`
+    /// for software, whose trust file lives in the fixture material).
+    _trust_tmp: Option<TempDir>,
+}
+
+impl SigningProfile {
+    /// The default profile: fixture software seeds, fixture trust file. Byte-for-
+    /// byte the legacy T0..T3 wiring.
+    fn software(fixtures: &DemoFixtures, files: &DemoFixtureFiles) -> Self {
+        SigningProfile {
+            server_signer: fixtures.server_signer().to_string(),
+            server_key_id: fixtures.server_key_id().to_string(),
+            server_key_source: vec![
+                "--key-source".into(),
+                "file".into(),
+                "--signing-key-seed".into(),
+                path(files.signing_seed_path()),
+            ],
+            server_trust_path: path(files.trust_path()),
+            client_signer_id: fixtures.signer().to_string(),
+            client_key_id: fixtures.signer_key_id().to_string(),
+            client_key_source: vec![
+                "--signing-key-seed".into(),
+                format!("@{}", path(files.signer_seed_path())),
+            ],
+            client_server_pubkey: fixtures.server_public_key_b64url(),
+            _trust_tmp: None,
+        }
+    }
+
+    /// Tier T4: both object-signing keys in Cloud KMS. Fetches each Ed25519 public
+    /// key from KMS (the SAME backend that signs), synthesizes the server's
+    /// `--trust` file from the client's KMS key, and hands the server's KMS key to
+    /// the client as `--server-pubkey`. mTLS stays file-backed.
+    #[cfg(feature = "gcp_kms")]
+    fn gcp_kms(
+        client_key_version: &str,
+        server_key_version: &str,
+        files: &DemoFixtureFiles,
+    ) -> Self {
+        // Stable cloud-custody identities (labels for the KMS keys); the trust
+        // wiring binds each to the public key actually fetched from KMS.
+        const CLIENT_SIGNER: &str = "did:example:kms-client";
+        const CLIENT_KEY_ID: &str = "gcp-kms-client-1";
+        const SERVER_SIGNER: &str = "did:example:kms-server";
+        const SERVER_KEY_ID: &str = "gcp-kms-server-1";
+
+        let client_pubkey = fetch_kms_pubkey_b64url(client_key_version);
+        let server_pubkey = fetch_kms_pubkey_b64url(server_key_version);
+
+        // The server PEP trusts the CLIENT's KMS public key as the request signer.
+        let trust_tmp = TempDir::new("kms-trust").expect("create kms trust dir");
+        let trust = serde_json::to_string_pretty(&json!([{
+            "signer": CLIENT_SIGNER,
+            "key_id": CLIENT_KEY_ID,
+            "public_key": client_pubkey,
+        }]))
+        .expect("serialize kms trust");
+        let trust_path = trust_tmp.path.join("trust.json");
+        std::fs::write(&trust_path, trust).expect("write kms trust file");
+
+        SigningProfile {
+            server_signer: SERVER_SIGNER.to_string(),
+            server_key_id: SERVER_KEY_ID.to_string(),
+            server_key_source: vec![
+                "--key-source".into(),
+                "gcp-kms".into(),
+                "--gcp-kms-key-version".into(),
+                server_key_version.to_string(),
+                // Required by the server CLI but UNUSED under gcp-kms (object
+                // signing is the KMS backend; the TLS key comes from --tls-key).
+                "--signing-key-seed".into(),
+                path(files.signing_seed_path()),
+            ],
+            server_trust_path: path(&trust_path),
+            client_signer_id: CLIENT_SIGNER.to_string(),
+            client_key_id: CLIENT_KEY_ID.to_string(),
+            client_key_source: vec![
+                "--key-source".into(),
+                "gcp-kms".into(),
+                "--gcp-kms-key-version".into(),
+                client_key_version.to_string(),
+            ],
+            client_server_pubkey: server_pubkey,
+            _trust_tmp: Some(trust_tmp),
+        }
+    }
+}
+
+/// Fetch an Ed25519 public key from GCP Cloud KMS as raw-32 Base64URL-no-pad (the
+/// trust-file / `--server-pubkey` wire format). Uses the proxy's own KMS backend,
+/// so the key returned is exactly the one that signs. Token via
+/// `MCPS_GCP_ACCESS_TOKEN` or, with `MCPS_GCP_USE_METADATA=1`, the metadata server.
+#[cfg(feature = "gcp_kms")]
+fn fetch_kms_pubkey_b64url(key_version: &str) -> String {
+    use mcps_proxy::kms_keysource::KmsEd25519Backend;
+    use mcps_proxy::GcpKmsConfig;
+    use mcps_proxy::GcpKmsEd25519Backend;
+
+    let config = GcpKmsConfig {
+        key_version_name: key_version.to_string(),
+        endpoint: std::env::var("MCPS_GCP_KMS_ENDPOINT")
+            .ok()
+            .filter(|s| !s.is_empty()),
+    };
+    let use_metadata = std::env::var("MCPS_GCP_USE_METADATA").is_ok_and(|v| v == "1");
+    let backend = GcpKmsEd25519Backend::new(&config, use_metadata)
+        .expect("construct GCP KMS backend (getPublicKey must succeed and be Ed25519)");
+    let spki = backend
+        .public_key_spki_der()
+        .expect("fetch KMS Ed25519 SPKI public key");
+    // RFC 8410 Ed25519 SPKI ends in the raw 32-byte point.
+    let raw: [u8; 32] = spki[spki.len() - 32..]
+        .try_into()
+        .expect("Ed25519 SPKI ends in a 32-byte point");
+    mcps_core::VerificationKey::from_bytes(&raw)
+        .expect("valid Ed25519 verification key")
+        .to_b64url()
 }
 
 /// A temp directory removed on drop.
@@ -145,6 +312,8 @@ pub struct FourHop {
     client: Child,
     demo_root: TempDir,
     _files: DemoFixtureFiles,
+    /// Held so the (KMS) `--trust` temp file outlives the running server.
+    _signing: SigningProfile,
 }
 
 impl FourHop {
@@ -153,10 +322,34 @@ impl FourHop {
         Self::launch_with(FourHopOptions::default())
     }
 
+    /// Tier T4: launch the four-hop with BOTH object-signing keys held in GCP
+    /// Cloud KMS (named by their key-version resource paths). mTLS stays
+    /// file-backed; the harness fetches both KMS public keys to wire trust.
+    #[cfg(feature = "gcp_kms")]
+    pub fn launch_kms(client_key_version: &str, server_key_version: &str) -> Self {
+        Self::launch_with(FourHopOptions {
+            signing: SigningMode::GcpKms {
+                client_key_version: client_key_version.to_string(),
+                server_key_version: server_key_version.to_string(),
+            },
+            ..FourHopOptions::default()
+        })
+    }
+
     /// Launch the topology with explicit options.
     pub fn launch_with(opts: FourHopOptions) -> Self {
         let fixtures = DemoFixtures::generate_default();
         let files = fixtures.write_files().expect("write fixture material");
+
+        // Resolve where the object-signing keys live (software seeds or Cloud KMS).
+        let profile = match &opts.signing {
+            SigningMode::Software => SigningProfile::software(&fixtures, &files),
+            #[cfg(feature = "gcp_kms")]
+            SigningMode::GcpKms {
+                client_key_version,
+                server_key_version,
+            } => SigningProfile::gcp_kms(client_key_version, server_key_version, &files),
+        };
 
         // A writable demo root, seeded so reads/lists have something real.
         let demo_root = TempDir::new("root").expect("create demo root");
@@ -175,6 +368,7 @@ impl FourHop {
             &inner_bin,
             demo_root.path.to_str().expect("utf-8 demo root"),
             &opts,
+            &profile,
         );
 
         let server_name = opts
@@ -189,6 +383,7 @@ impl FourHop {
             server.addr,
             &server_name,
             opts.client_cert,
+            &profile,
         );
 
         FourHop {
@@ -198,6 +393,7 @@ impl FourHop {
             client,
             demo_root,
             _files: files,
+            _signing: profile,
         }
     }
 
@@ -268,24 +464,27 @@ impl ServerProc {
         inner_bin: &str,
         demo_root: &str,
         opts: &FourHopOptions,
+        profile: &SigningProfile,
     ) -> ServerProc {
         let mut args: Vec<String> = vec![
             "--bind".into(), "127.0.0.1:0".into(),
             "--audience".into(), audience_string.into(),
-            "--server-signer".into(), "did:example:server-1".into(),
-            "--server-key-id".into(), "server-key-1".into(),
+            "--server-signer".into(), profile.server_signer.clone(),
+            "--server-key-id".into(), profile.server_key_id.clone(),
             "--max-clock-skew".into(), "300".into(),
             // The recommended strict posture: refuse draft-01 as a downgrade.
             "--expected-version-policy".into(), "draft-02-only".into(),
-            "--key-source".into(), "file".into(),
-            "--signing-key-seed".into(), path(files.signing_seed_path()),
+        ];
+        // Object-signing key source: fixture seed (software) or Cloud KMS (T4).
+        args.extend(profile.server_key_source.iter().cloned());
+        args.extend([
             "--tls-cert".into(), path(files.server_cert_path()),
             "--tls-key".into(), path(files.server_key_path()),
             "--client-ca".into(), path(files.client_ca_path()),
-            "--trust".into(), path(files.trust_path()),
+            "--trust".into(), profile.server_trust_path.clone(),
             // The fixture leaves are long-lived; lift the 1h default ceiling.
             "--max-client-cert-lifetime".into(), "175200h".into(),
-        ];
+        ]);
         match opts.transport_binding {
             TransportBinding::None => {
                 args.push("--transport-binding".into());
@@ -394,6 +593,7 @@ fn spawn_client(
     server_addr: SocketAddr,
     server_name: &str,
     client_cert: ClientCert,
+    profile: &SigningProfile,
 ) -> (Child, ChildStdin, BufReader<ChildStdout>) {
     let (cert_path, key_path) = match client_cert {
         ClientCert::Matching => (files.client_cert_path(), files.client_key_path()),
@@ -411,21 +611,25 @@ fn spawn_client(
         audience.to_audience_string(),
         "client audience fields must derive the server's audience string"
     );
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "--remote-addr".into(), server_addr.to_string(),
         "--server-name".into(), server_name.to_string(),
-        "--signer-id".into(), fixtures.signer().to_string(),
-        "--key-id".into(), fixtures.signer_key_id().to_string(),
-        "--signing-key-seed".into(), format!("@{}", path(files.signer_seed_path())),
-        "--server-signer".into(), fixtures.server_signer().to_string(),
-        "--server-key-id".into(), fixtures.server_key_id().to_string(),
-        "--server-pubkey".into(), fixtures.server_public_key_b64url(),
+        "--signer-id".into(), profile.client_signer_id.clone(),
+        "--key-id".into(), profile.client_key_id.clone(),
+    ];
+    // Request-signing key source: fixture seed (software) or Cloud KMS (T4).
+    args.extend(profile.client_key_source.iter().cloned());
+    args.extend([
+        // The server's own response-signing identity + the key the client trusts.
+        "--server-signer".into(), profile.server_signer.clone(),
+        "--server-key-id".into(), profile.server_key_id.clone(),
+        "--server-pubkey".into(), profile.client_server_pubkey.clone(),
         "--audience".into(), audience_fields,
         "--tls-cert".into(), path(cert_path),
         "--tls-key".into(), path(key_path),
         "--server-ca".into(), path(files.server_ca_path()),
         "--on-behalf-of".into(), "user:alice".into(),
-    ];
+    ]);
 
     let mut child = Command::new(client_bin)
         .args(&args)
