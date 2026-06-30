@@ -17,17 +17,26 @@
 //! therefore depends only on `mcps-core` (pure primitives) and `serde_json`; it
 //! pulls in NO networking/async/fs crate.
 //!
-//! # Slice status (MCPS-40, #187)
-//! Landed: signed draft-02 request construction + `request_hash`
-//! ([`build_signed_request`] / [`build_signed_tool_call`]) with fail-closed
-//! rejection of an unsupported `canonicalization_id`. The response verifier,
-//! enforcement engine, authz-binding hook, signer custody, correlation store,
+//! # Slice status
+//! Landed:
+//! - MCPS-40 (#187): signed draft-02 request construction + `request_hash`
+//!   ([`build_signed_request`] / [`build_signed_tool_call`]) with fail-closed
+//!   rejection of an unsupported `canonicalization_id`.
+//! - MCPS-41 (#188): signed-response verification + request binding
+//!   ([`verify_signed_response`] / [`ResponseExpectation`]) — server_signer via
+//!   the injected `TrustResolver`, `request_hash`/`canonicalization_id` binding,
+//!   unsigned + unexpected-signer fail-closed.
+//!
+//! The enforcement engine, authz-binding hook, signer custody, correlation store,
 //! discovery, and audit/error mapping land in the following sprint slices
-//! (#188–#200) on top of this seam.
+//! (#189–#200) on top of this seam.
 
 pub mod request;
+pub mod response;
 
 pub use request::build_signed_request;
 pub use request::build_signed_tool_call;
 pub use request::RequestSigningInputs;
 pub use request::SignedRequest;
+pub use response::verify_signed_response;
+pub use response::ResponseExpectation;
