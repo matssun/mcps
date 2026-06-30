@@ -92,10 +92,26 @@ the live-cloud script. The ladder maps onto the phases:
   before dispatch, proven via the proxy lifecycle sink (no `--received-log`
   wiring — the demo proxy clears the inner environment, so the on-disk cross-check
   is a cross-process concern deferred to Phase 3) → **T2**.
-- **Phase 3** — `mcps-client-proxy-cli` binary + real `RemoteTransport`; the
-  multi-process harness → **T0**, **T1**; plus D1 server wiring. mTLS variant +
-  the `--received-log` cross-process confirmation (denied reader write absent from
-  the inner's own record, admin write present) → **T3**.
+- **Phase 3** — the multi-process four-hop, in sub-phases:
+  - **3a** — D1 server wiring: `verify_request_dispatch` + `ExpectedVersionPolicy`
+    field/builder/`--expected-version-policy` flag (default `Draft01AndDraft02`;
+    walkthrough opts into `Draft02Only`).
+  - **3b** — `mcps-client-proxy-cli` binary + a real mTLS `RemoteTransport`.
+  - **3b.5** — *server* draft-02 serving in `mcps-proxy`. **Necessary discovery:**
+    D1 wired only the *verify* step; `build_forwarded_request` / `build_signed_response`
+    were still draft-01-only (a draft-02 verdict failed closed at the
+    `authorization_hash` extraction). 3b.5 version-branches both: a draft-02
+    verified context (binding, no hash sentinel) and a protected draft-02 response
+    envelope. Without it the four-hop only proves verification, not serving.
+  - **3c** — the `mcps-walkthrough` crate + the four-hop harness → **T0**, **T1**.
+    NOTE: the client-proxy is mTLS-only, so the four-hop runs over
+    **mTLS-on-loopback** throughout (not plain loopback); the lower tiers
+    deliberately leave transport-identity *binding* off (`--transport-binding
+    none`) — message-level security is transport-independent.
+  - **3d** — **T3**: `--transport-binding exact` + transport/protocol negatives
+    (mismatched client cert, wrong server name, downgrade) + the `--received-log`
+    cross-process confirmation (a denied request absent from the inner's own
+    record, an allowed one present).
 - **Phase 4** — client-side GCP KMS signer in `mcps-client-core` + live lane →
   **T4**.
 - **Phase 5** — sanitized two-version model (real `work/` script gitignored; a
