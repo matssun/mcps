@@ -51,12 +51,13 @@ from .transport import (
     McpsConfig,
     _request_fields,
     sign_outbound,
-    verify_inbound,
 )
 
-# A synchronous request/response round trip: signed request bytes in, response
-# body bytes out. One call == one mTLS connection + POST in the production wiring.
-PostSync = Callable[[bytes], bytes]
+# A synchronous request/response round trip: signed request bytes in, the response
+# ``(content_type, body)`` out. One call == one mTLS connection + POST in the
+# production wiring. The content type lets the multi-path decoder distinguish a
+# direct-JSON response from a (single) SSE-framed one.
+PostSync = Callable[[bytes], "tuple[str, bytes]"]
 
 # JSON-RPC server-error code carrying a fail-closed MCP-S rejection back to the
 # awaiting ClientSession call (reserved server-error range, -32000..-32099).
@@ -125,6 +126,8 @@ class McpsHttpTransport:
     async def _round_trip(self, session_message: Any, rid: Any) -> None:
         import anyio
 
+        from .streamable import verify_inbound_messages
+
         now = self._clock()
         wire = sign_outbound(
             session_message,
@@ -134,15 +137,20 @@ class McpsHttpTransport:
             nonce=self._nonce_factory(),
             expires_unix=now + self._config.ttl_seconds,
         )
-        body = await anyio.to_thread.run_sync(self._post, wire)
-        outcome = verify_inbound(body, self._config, self._correlation, now_unix=self._clock())
-        if outcome.kind in ("accept", "passthrough"):
-            await self._app_read_send.send(outcome.message)
-        else:
-            # Fail closed as a JSON-RPC error bound to the request id (NOT a stream
-            # Exception — ClientSession would not fail the awaiting call on that, and
-            # the request would hang). The frozen mcps.* reason rides in `message`.
-            await self._app_read_send.send(self._reject_message(rid, outcome.reason))
+        content_type, body = await anyio.to_thread.run_sync(self._post, wire)
+        # Route the response through the multi-path decoder so a direct-JSON OR a
+        # (single) SSE-framed response is verified the same way; every decoded
+        # message gets the correlated-response verification or the server-initiated
+        # inbound policy. The one-POST-per-request proxy contract yields exactly one
+        # response, so a reject binds to this request's id (so the awaiting call
+        # raises, not hangs); an accepted/passed-through message is delivered as-is.
+        for outcome in verify_inbound_messages(
+            content_type, body, self._config, self._correlation, now_unix=self._clock()
+        ):
+            if outcome.kind in ("accept", "passthrough"):
+                await self._app_read_send.send(outcome.message)
+            else:
+                await self._app_read_send.send(self._reject_message(rid, outcome.reason))
 
     @staticmethod
     def _reject_message(rid: Any, reason: Optional[str]) -> Any:

@@ -134,9 +134,30 @@ def test_verify_inbound_uncorrelatable_without_pending():
     assert out.reason == "mcps.response_hash_mismatch"
 
 
-def test_verify_inbound_passes_through_server_notification():
+def test_verify_inbound_rejects_server_notification_by_default():
+    """A server-initiated NOTIFICATION (no id) has no request_hash binding, so the
+    core cannot verify it; the safe default fails closed with the frozen reason."""
     notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/message", "params": {"x": 1}}).encode()
     out = verify_inbound(notif, _config(), mcps_sdk.CorrelationStore(), now_unix=NOW)
+    assert out.kind == "reject"
+    assert out.reason == "mcps.notification_forbidden"
+
+
+def test_verify_inbound_rejects_server_request_by_default():
+    """A server-initiated REQUEST (id + method, e.g. sampling) is likewise
+    unverifiable (no request_hash we hold) and fails closed."""
+    req = json.dumps({"jsonrpc": "2.0", "id": "s-1", "method": "sampling/createMessage", "params": {}}).encode()
+    out = verify_inbound(req, _config(), mcps_sdk.CorrelationStore(), now_unix=NOW)
+    assert out.kind == "reject"
+    assert out.reason == "mcps.missing_envelope"
+
+
+def test_verify_inbound_passes_through_server_initiated_when_allowed():
+    """With the explicit opt-in, a server-initiated message is delivered unverified
+    (audited as no-evidence) instead of failing closed."""
+    notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/message", "params": {"x": 1}}).encode()
+    config = _config(allow_unverified_server_initiated=True)
+    out = verify_inbound(notif, config, mcps_sdk.CorrelationStore(), now_unix=NOW)
     assert out.kind == "passthrough"
     assert out.message.message.root.method == "notifications/message"
 

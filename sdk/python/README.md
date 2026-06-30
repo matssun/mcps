@@ -9,7 +9,7 @@ signed requests and verified responses, added without changing application code.
 > verification (`verify_response` / `TrustResolver`), in-flight correlation
 > (`CorrelationStore`), and the **transport adapter** (`McpsTransport` / `connect`)
 > that signs/verifies at the byte boundary so `mcp.ClientSession` speaks plain MCP.
-> 51 tests pass, all parity against independent `mcps-client-core` oracle vectors —
+> 70 tests pass, all parity against independent `mcps-client-core` oracle vectors —
 > including **three live cross-process e2es against real Rust binaries**:
 > 1. **stdio** — the adapter drives a real `tools/call` to the real server-side
 >    proxy (`mcps-stdio-server --mode proxy` = `mcps_proxy::Proxy`).
@@ -25,8 +25,16 @@ signed requests and verified responses, added without changing application code.
 >    delivered as a JSON-RPC error correlated to the request id so the awaiting call
 >    raises rather than hangs. All three have a fail-closed live negative.
 >
-> **Remaining:** streamable-HTTP multi-path inbound decode, signed/verified
-> server-initiated messages (currently dropped), and pinning upstream `mcp`.
+> **Multi-path inbound decode + server-initiated policy (done).** `streamable.py`
+> decodes all three streamable-HTTP inbound sites (direct JSON, POST-SSE,
+> standalone GET-SSE) to JSON-RPC payloads and routes EVERY one through the same
+> verification. Server-initiated messages (a server→client request/notification)
+> carry no `request_hash`, so the core cannot verify them: the inbound policy
+> **fails closed** by default (`mcps.missing_envelope` / `mcps.notification_forbidden`)
+> and passes them through only under an explicit `allow_unverified_server_initiated`
+> opt-in (audited as no-evidence). **Remaining:** an incremental SSE *streaming*
+> transport (consuming events on a long-lived connection — the decoder is the layer
+> it plugs into) and pinning upstream `mcp`.
 >
 > Transport/e2e tests need `mcp` (Python ≥ 3.10): `uv venv --python 3.12 .venv312`.
 > The stdio e2e needs `cargo build -p mcps-conformance --bin mcps-stdio-server`; the
@@ -95,11 +103,15 @@ pytest                     # test_core_link runs; parity tests skip until impl
 - **Pin upstream `mcp`.** The package is mid-refactor (the v1 session layer was
   removed; message types moved to `mcp_types`). Pin to an exact version once the
   transport seam stabilizes.
-- **Streamable HTTP has three inbound decode sites** (direct JSON, POST-SSE,
-  standalone-GET SSE) — all must route through verification.
-- **Server-initiated messages** (sampling / roots / notifications) aren't
+- ~~**Streamable HTTP has three inbound decode sites** (direct JSON, POST-SSE,
+  standalone-GET SSE) — all must route through verification.~~ Done: `streamable.py`
+  (`decode_inbound` / `verify_inbound_messages`). Remaining is the incremental SSE
+  *streaming* transport that consumes a long-lived connection.
+- ~~**Server-initiated messages** (sampling / roots / notifications) aren't
   responses to a correlated request, so the `request_hash` binding doesn't cover
-  them; the adapter needs an inbound policy for them.
+  them; the adapter needs an inbound policy for them.~~ Done: fail-closed inbound
+  policy (the core cannot verify them — no `request_hash`), opt-out via
+  `McpsConfig.allow_unverified_server_initiated`.
 - **Transport-as-dispatcher rework** upstream may move the integration seam.
 
 See ADR-MCPS-044 §SDK wrap-or-fork rule and issue #199.

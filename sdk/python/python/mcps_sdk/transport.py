@@ -55,6 +55,15 @@ class McpsConfig:
     legacy_allowed: bool = False
     ttl_seconds: int = 300
     route_id: str = "default"
+    # Inbound policy for SERVER-INITIATED messages (a server->client request or
+    # notification — NOT a response to one of our signed requests). The MCP-S
+    # evidence model binds a server's signature to the client's `request_hash`; a
+    # server-initiated message has none, so `mcps-client-core` cannot verify it.
+    # The safe default therefore FAILS CLOSED (reject with an in-taxonomy reason).
+    # Set True only for a transitional deployment that knowingly accepts unverified
+    # server-initiated traffic — it is then delivered to the app, audited as
+    # carrying no evidence.
+    allow_unverified_server_initiated: bool = False
 
 
 def _rfc3339(unix: int) -> str:
@@ -156,16 +165,32 @@ def verify_inbound(
     A response to one of our requests (has ``id``, no ``method``) is correlated and
     verified; on accept the MCP-S envelope is stripped and a plain SessionMessage is
     returned. A late/uncorrelatable/expired correlation or a failed verification is
-    a fail-closed reject. Server-initiated requests/notifications are passed through
-    unverified for now (#199 gap).
+    a fail-closed reject.
+
+    A SERVER-INITIATED message (it carries a ``method`` — a server->client request if
+    id-bearing, a notification if not) is NOT a response to one of our requests, so
+    there is no ``request_hash`` to bind it and the core cannot verify it. The
+    ``allow_unverified_server_initiated`` policy decides: fail closed under the safe
+    default (``mcps.missing_envelope`` for an id-bearing server request,
+    ``mcps.notification_forbidden`` for a notification — both in the frozen
+    taxonomy), or pass it through unverified (audited as no-evidence) when allowed.
     """
     obj = json.loads(line)
     has_method = "method" in obj
     rid = obj.get("id")
 
-    if rid is None or has_method:
-        # Server-initiated request or notification — not a response to us.
-        return InboundOutcome("passthrough", message=_session_message(obj))
+    if has_method:
+        # Server-initiated request/notification — no request_hash binding exists, so
+        # the core cannot verify it. Apply the inbound policy.
+        if config.allow_unverified_server_initiated:
+            return InboundOutcome("passthrough", message=_session_message(obj))
+        reason = "mcps.missing_envelope" if rid is not None else "mcps.notification_forbidden"
+        return InboundOutcome("reject", reason=reason)
+
+    if rid is None:
+        # Neither a method nor an id: not a correlatable JSON-RPC response. Fail
+        # closed rather than deliver an uncorrelatable, unverifiable message.
+        return InboundOutcome("reject", reason="mcps.missing_envelope")
 
     # A response to one of our outstanding requests.
     try:

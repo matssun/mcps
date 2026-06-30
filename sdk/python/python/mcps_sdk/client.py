@@ -114,8 +114,8 @@ async def connect_mtls_http(
     ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=server_ca)
     ctx.load_cert_chain(client_cert, client_key)
 
-    def post_sync(body: bytes) -> bytes:
-        """One mTLS HTTP/1.1 POST; returns the response body bytes."""
+    def post_sync(body: bytes) -> "tuple[str, bytes]":
+        """One mTLS HTTP/1.1 POST; returns ``(content_type, response_body)``."""
         raw = socket.create_connection((host, port), timeout=timeout)
         tls = ctx.wrap_socket(raw, server_hostname=server_name)
         try:
@@ -132,7 +132,14 @@ async def connect_mtls_http(
                 resp += chunk
         finally:
             tls.close()
-        return resp.split(b"\r\n\r\n", 1)[1]
+        head_bytes, _, resp_body = resp.partition(b"\r\n\r\n")
+        content_type = ""
+        for line in head_bytes.split(b"\r\n"):
+            name, sep, value = line.partition(b":")
+            if sep and name.strip().lower() == b"content-type":
+                content_type = value.strip().decode("latin-1")
+                break
+        return content_type, resp_body
 
     transport = McpsHttpTransport(
         post_sync, config, correlation, clock=clock, nonce_factory=nonce_factory

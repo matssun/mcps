@@ -39,6 +39,9 @@ __all__ = [
     "connect",
     "connect_stdio",
     "connect_mtls_http",
+    "decode_inbound",
+    "sse_data_events",
+    "verify_inbound_messages",
 ]
 
 #: MCP-S protocol version the bound core verifies/signs against (e.g. "draft-02").
@@ -70,6 +73,7 @@ PendingRequest = _core.PendingRequest
 # where `mcp` is not installed.
 from .transport import McpsConfig, McpsTransport, McpsVerificationError  # noqa: E402
 from .http_transport import McpsHttpTransport  # noqa: E402
+from .streamable import decode_inbound, sse_data_events, verify_inbound_messages  # noqa: E402
 from .client import connect, connect_mtls_http, connect_stdio  # noqa: E402
 
 #: Response-envelope key the adapter strips before handing a plain response to the app.
