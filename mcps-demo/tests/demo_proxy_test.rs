@@ -170,15 +170,22 @@ fn proxy_spawns_fileserver_and_tools_list_flows_through() {
         "the verified request must be forwarded: {tags:?}"
     );
 
-    // The demo fileserver's single tool came back through the proxy, and the
+    // The demo fileserver's four tools came back through the proxy, and the
     // response is signed by the server key + bound to the request hash.
     assert!(response.get("error").is_none(), "response: {response}");
     let verified = verify_response(&response_bytes, &server_resolver(), &expected_hash)
         .expect("proxy response verifies + binds to request_hash");
     assert_eq!(verified.server_signer(), SERVER);
     let tools = response["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0]["name"], "list_files");
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name"))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["list_files", "read_file", "stat", "write_file"],
+        "the four demo fileserver tools must flow through the proxy"
+    );
 }
 
 #[test]

@@ -356,6 +356,23 @@ nt_rust_test(
     ],
 )
 
+# ADR-MCPS-039 (D1): the expected-version posture is wired into the sidecar. The
+# default admits a host-signed draft-01 request end-to-end; a Draft02Only proxy
+# refuses the same request as mcps.downgrade_forbidden before dispatch.
+nt_rust_test(
+    name = "proxy_version_policy_test",
+    srcs = ["tests/proxy_version_policy_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_proxy",
+        "//mcps-core:mcps_core",
+        "//mcps-host:mcps_host",
+        "@crates_mcps//:serde_json",
+    ],
+)
+
 # MCPS-027: KeySource (File + Env) — signing key + TLS cert/key + client-CA.
 nt_rust_test(
     name = "key_source_test",

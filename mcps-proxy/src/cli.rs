@@ -15,6 +15,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mcps_core::ExpectedVersionPolicy;
 use mcps_core::InMemoryTrustResolver;
 use mcps_core::VerificationKey;
 use serde_json::Value;
@@ -147,6 +148,13 @@ pub struct Config {
     pub server_key_id: String,
     /// Symmetric clock skew (seconds).
     pub max_clock_skew: i64,
+    /// ADR-MCPS-039 (D1): expected-version posture enforced on inbound requests.
+    /// `--expected-version-policy draft-02-only` refuses draft-01 as a downgrade;
+    /// `draft-01-and-draft-02` (the default when the flag is omitted) admits both,
+    /// each strictly verified by its own profile. The default preserves
+    /// back-compatibility with deployed draft-01 front-ends; tighten it once
+    /// draft-01 is retired.
+    pub expected_version_policy: ExpectedVersionPolicy,
     /// Where key material is read from.
     pub key_source: KeySourceKind,
     /// Location (path or env var) of the Base64URL Ed25519 signing-key seed.
@@ -372,6 +380,7 @@ const KNOWN_PROXY_FLAGS: &[&str] = &[
     "--server-signer",
     "--server-key-id",
     "--max-clock-skew",
+    "--expected-version-policy",
     "--key-source",
     "--pkcs11-module",
     "--pkcs11-pin",
@@ -443,6 +452,10 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut server_signer = None;
     let mut server_key_id = None;
     let mut max_clock_skew: i64 = 300;
+    // ADR-MCPS-039 (D1): default to the migration posture (admit both wire
+    // profiles) so an omitted flag preserves back-compat with draft-01 clients;
+    // `--expected-version-policy draft-02-only` tightens it.
+    let mut expected_version_policy = ExpectedVersionPolicy::Draft01AndDraft02;
     let mut key_source = KeySourceKind::File;
     let mut signing_key_seed = None;
     let mut tls_cert = None;
@@ -612,6 +625,10 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             "--server-key-id" => server_key_id = Some(value.clone()),
             "--max-clock-skew" => {
                 max_clock_skew = value.parse().map_err(|_| "invalid --max-clock-skew".to_string())?
+            }
+            "--expected-version-policy" => {
+                expected_version_policy = ExpectedVersionPolicy::from_config(Some(value.as_str()))
+                    .map_err(|e| format!("invalid --expected-version-policy: {e}"))?
             }
             "--key-source" => {
                 key_source = match value.as_str() {
@@ -1247,6 +1264,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         server_signer: require(server_signer, "--server-signer")?,
         server_key_id: require(server_key_id, "--server-key-id")?,
         max_clock_skew,
+        expected_version_policy,
         key_source,
         signing_key_seed: require(signing_key_seed, "--signing-key-seed")?,
         tls_cert: require(tls_cert, "--tls-cert")?,

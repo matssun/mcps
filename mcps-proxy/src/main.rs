@@ -351,6 +351,7 @@ fn run() -> Result<(), String> {
         config.max_clock_skew,
         inner,
     )
+    .with_expected_version_policy(config.expected_version_policy)
     .with_log_sink(Arc::clone(&log_sink));
     if config.replay == ReplayKind::File {
         let path = config

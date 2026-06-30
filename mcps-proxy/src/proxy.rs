@@ -23,7 +23,8 @@ use std::sync::Arc;
 use mcps_core::json_rpc_error_object;
 use mcps_core::response_signing_preimage;
 use mcps_core::unix_to_rfc3339_utc;
-use mcps_core::verify_request;
+use mcps_core::verify_request_dispatch;
+use mcps_core::ExpectedVersionPolicy;
 use mcps_core::InMemoryReplayCache;
 use mcps_core::McpsError;
 use mcps_core::ReplayCache;
@@ -92,6 +93,15 @@ pub struct Proxy {
     key_id: String,
     resolver: Box<dyn TrustResolver>,
     config: VerificationConfig,
+    /// ADR-MCPS-039 (D1): the expected-version posture this proxy enforces on
+    /// inbound requests. The default ([`ExpectedVersionPolicy::Draft01AndDraft02`])
+    /// admits both wire profiles — each verified strictly by its own profile,
+    /// never cross-accepted — so a legacy draft-01 front-end (`mcps-host`) and a
+    /// draft-02 front-end (`mcps-client-proxy`) both work. A deployment that has
+    /// retired draft-01 tightens this to [`ExpectedVersionPolicy::Draft02Only`]
+    /// via [`Proxy::with_expected_version_policy`], at which point a draft-01
+    /// envelope fails closed as `mcps.downgrade_forbidden`.
+    version_policy: ExpectedVersionPolicy,
     inner: Box<dyn InnerServer>,
     replay: RefCell<Box<dyn ReplayCache>>,
     policy: Option<PolicyEnforcement>,
@@ -143,6 +153,10 @@ impl Proxy {
                 expected_audience: expected_audience.into(),
                 max_clock_skew_secs,
             },
+            // Back-compatible default: admit both wire profiles (each strictly
+            // verified by its own profile). Tighten with
+            // `with_expected_version_policy` once draft-01 is retired.
+            version_policy: ExpectedVersionPolicy::Draft01AndDraft02,
             inner,
             replay: RefCell::new(Box::new(InMemoryReplayCache::new(max_clock_skew_secs))),
             policy: None,
@@ -162,6 +176,17 @@ impl Proxy {
         log_sink: Arc<dyn InnerLogSink + Send + Sync>,
     ) -> Self {
         self.log_sink = Some(log_sink);
+        self
+    }
+
+    /// Set the expected-version posture (ADR-MCPS-039 D1) this proxy enforces on
+    /// inbound requests. The constructor default is
+    /// [`ExpectedVersionPolicy::Draft01AndDraft02`] (admit both, each strictly
+    /// verified by its own profile); pass [`ExpectedVersionPolicy::Draft02Only`]
+    /// to refuse draft-01 as a downgrade (`mcps.downgrade_forbidden`). Resolve the
+    /// value from operator config with [`ExpectedVersionPolicy::from_config`].
+    pub fn with_expected_version_policy(mut self, policy: ExpectedVersionPolicy) -> Self {
+        self.version_policy = policy;
         self
     }
 
@@ -268,12 +293,13 @@ impl Proxy {
             .unwrap_or(Value::Null);
 
         let verify_result = match self.replay.try_borrow_mut() {
-            Ok(mut replay) => verify_request(
+            Ok(mut replay) => verify_request_dispatch(
                 request_bytes,
                 self.resolver.as_ref(),
                 &mut **replay,
                 &self.config,
                 now_unix,
+                self.version_policy,
             ),
             Err(_) => Err(McpsError::ReplayCacheUnavailable),
         };
