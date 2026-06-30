@@ -155,6 +155,108 @@ pub fn mint_demo_grant(
     Ok(DemoGrant { artifact })
 }
 
+// --- Scoped role grants (Tier T2: reader vs admin) --------------------------
+//
+// The fileserver tool names the role grants enumerate, kept as local string
+// literals like [`DEMO_TOOL_NAME`] so this crate stays self-contained (it never
+// depends on `mcps-demo-fileserver`; it launches its binary as a subprocess).
+const TOOL_READ_FILE: &str = "read_file";
+const TOOL_STAT: &str = "stat";
+const TOOL_WRITE_FILE: &str = "write_file";
+
+/// A demo authorization role: the set of fileserver tools an identity may call.
+///
+/// This mirrors the fileserver's INERT `net.mcps.intendedScope` tags. `Reader`
+/// covers the read-only `protected` tools (`list_files`, `read_file`, `stat`);
+/// `Admin` additionally covers the `admin`-tagged `write_file`. The reference
+/// profile knows nothing about the scope-tag strings — a role is realized, per
+/// its "enumerate the allowed operations" convention, as the SET of `tools/call`
+/// operations the grant lists. The role demo deliberately puts NO argument
+/// (path) constraint on the operations: the demonstration is about ROLE, not
+/// path — the fileserver still physically confines every call to the demo root.
+pub enum DemoRole {
+    /// Read-only: `list_files`, `read_file`, `stat`.
+    Reader,
+    /// Read-write: the reader tools plus `write_file`.
+    Admin,
+}
+
+impl DemoRole {
+    /// The tool names this role authorizes, in advertised order.
+    pub fn tools(&self) -> &'static [&'static str] {
+        match self {
+            DemoRole::Reader => &[DEMO_TOOL_NAME, TOOL_READ_FILE, TOOL_STAT],
+            DemoRole::Admin => &[DEMO_TOOL_NAME, TOOL_READ_FILE, TOOL_STAT, TOOL_WRITE_FILE],
+        }
+    }
+}
+
+/// The identity + window inputs that pin a demo ROLE grant.
+///
+/// The bindings are exactly those of [`DemoGrantSpec`] (grantee == verified
+/// signer, subject == verified `on_behalf_of`, audience, `[not_before,
+/// expires_at]` window), but the authorized operations come from [`DemoRole`]
+/// instead of a single `list_files` path — so one grant can cover a whole role's
+/// toolset.
+pub struct DemoRoleGrantSpec {
+    /// The granting authority identity (the grant issuer).
+    pub issuer: String,
+    /// The agent identity allowed to wield the grant (must equal the verified
+    /// request signer).
+    pub grantee: String,
+    /// The party acted for (must equal the verified `on_behalf_of`).
+    pub subject: String,
+    /// The intended server (must equal the verified `audience`).
+    pub audience: String,
+    /// The role whose toolset this grant authorizes.
+    pub role: DemoRole,
+    /// Validity-window start (RFC 3339 UTC).
+    pub not_before: String,
+    /// Validity-window end (RFC 3339 UTC).
+    pub expires_at: String,
+    /// Opaque revocation identifier.
+    pub revocation_id: String,
+}
+
+impl DemoRoleGrantSpec {
+    /// The `ReferenceGrantSpec` minted from this role spec: one unconstrained
+    /// `tools/call` operation per tool the role covers ([`DemoRole::tools`]).
+    fn reference_spec(&self) -> ReferenceGrantSpec {
+        ReferenceGrantSpec {
+            issuer: self.issuer.clone(),
+            grantee: self.grantee.clone(),
+            subject: self.subject.clone(),
+            audience: self.audience.clone(),
+            operations: self
+                .role
+                .tools()
+                .iter()
+                .map(|tool| GrantedOperation {
+                    method: DEMO_METHOD.to_string(),
+                    tool: (*tool).to_string(),
+                    // No argument constraint: any path inside the demo root.
+                    arguments: None,
+                })
+                .collect(),
+            not_before: self.not_before.clone(),
+            expires_at: self.expires_at.clone(),
+            revocation_id: self.revocation_id.clone(),
+        }
+    }
+}
+
+/// Mint a demo ROLE grant from `spec`, signed by `issuer_key` / `issuer_key_id`.
+/// Pure — signing has no side effects. Reuses [`DemoGrant`], so the minted grant
+/// attaches and binds exactly like a single-operation [`mint_demo_grant`] grant.
+pub fn mint_demo_role_grant(
+    spec: &DemoRoleGrantSpec,
+    issuer_key: &SigningKey,
+    issuer_key_id: &str,
+) -> Result<DemoGrant, PolicyError> {
+    let artifact = mint_reference_grant(&spec.reference_spec(), issuer_key, issuer_key_id)?;
+    Ok(DemoGrant { artifact })
+}
+
 /// Build a [`PolicyEvaluator`](mcps_policy::PolicyEvaluator) with the Reference
 /// Signed Authorization Profile registered — the evaluator the demo proxy uses
 /// to render allow/deny over the demo grant. Issuer keys are resolved through the

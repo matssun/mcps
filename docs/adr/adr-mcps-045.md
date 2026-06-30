@@ -79,8 +79,8 @@ command to run it). Each tier adds exactly one capability over the previous.
 |------|---------|----------------------------|-----------|------|-------|
 | **T0** Hello, signed call | Individual, "just see it work" | object signing + response binding (authenticity, not yet authorization) | loopback | software | none |
 | **T1** Real tools, fail closed | Individual, maturing | extended fileserver (`read`/`write`/`stat`) + the fail-closed cases (tamper, replay, unsigned) over the wire | loopback | software | none |
-| **T2** Internal roles | Small company, internal | scoped delegated authorization — reader vs admin grant; write **denied before dispatch** (received-log proves the inner never ran) | loopback | software | reference profile |
-| **T3** External users | Small company, external users | mTLS identity binding (`transport-binding exact`) + transport negatives (no cert, untrusted CA, identity≠signer) | **mTLS** | software | reference profile |
+| **T2** Internal roles | Small company, internal | scoped delegated authorization — reader vs admin grant; reader's write **denied before dispatch** (`authorization_scope_denied`, proxy lifecycle sink shows the inner was never reached), admin's write allowed | loopback | software | reference profile |
+| **T3** External users | Small company, external users | mTLS identity binding (`transport-binding exact`) + transport negatives (no cert, untrusted CA, identity≠signer); plus the **received-log cross-process confirmation** — a denied reader write leaves the inner's own append-only record unchanged, an allowed admin write is recorded | **mTLS** | software | reference profile |
 | **T4** Enterprise key custody | Larger enterprise | **both** client and server signing keys in GCP Cloud KMS (non-exporting); the full four-hop with cloud-held identities | mTLS | **GCP KMS** | reference profile |
 
 T0–T3 run offline with `cargo test`; T4 is `#[ignore]`/env-gated and runs from
@@ -88,10 +88,14 @@ the live-cloud script. The ladder maps onto the phases:
 
 - **Phase 1** — extend `mcps-demo-fileserver` (`read_file`/`write_file`/`stat`,
   scope tags, optional `--received-log`) → enables **T1**, **T2**.
-- **Phase 2** — scoped `mcps-policy` grants (reader/admin) → **T2**.
+- **Phase 2** — scoped `mcps-policy` grants (reader/admin); reader's write denied
+  before dispatch, proven via the proxy lifecycle sink (no `--received-log`
+  wiring — the demo proxy clears the inner environment, so the on-disk cross-check
+  is a cross-process concern deferred to Phase 3) → **T2**.
 - **Phase 3** — `mcps-client-proxy-cli` binary + real `RemoteTransport`; the
-  multi-process harness → **T0**, **T1**; plus D1 server wiring. mTLS variant →
-  **T3**.
+  multi-process harness → **T0**, **T1**; plus D1 server wiring. mTLS variant +
+  the `--received-log` cross-process confirmation (denied reader write absent from
+  the inner's own record, admin write present) → **T3**.
 - **Phase 4** — client-side GCP KMS signer in `mcps-client-core` + live lane →
   **T4**.
 - **Phase 5** — sanitized two-version model (real `work/` script gitignored; a

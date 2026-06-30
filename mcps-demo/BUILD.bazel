@@ -165,6 +165,38 @@ nt_rust_test(
     ],
 )
 
+# MCPS-045 (Tier T2): scoped delegated authorization — reader vs admin roles.
+# Same policy-enabled serving path as demo_authorization_test, but the grant
+# carries a ROLE's toolset (reader = list/read/stat; admin = + write_file) rather
+# than a single path. Proves the T2 invariant: a reader-signed write_file is
+# denied (mcps.authorization_scope_denied) BEFORE dispatch — the inner fileserver
+# is never spawned and nothing lands on disk — while an admin-signed write
+# succeeds end-to-end, and the reader's read_file/list_files are allowed. The
+# demo root here is the test's own WRITABLE dir (TEST_TMPDIR under bazel), not the
+# read-only fixture, since the admin path actually writes; only the inner binary
+# comes via runfiles. Resolved via $(rlocationpath ...) — no hardcoded path.
+nt_rust_test(
+    name = "demo_scope_test",
+    srcs = ["tests/demo_scope_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    data = [
+        "//mcps-demo-fileserver:mcps_demo_fileserver_bin",
+    ],
+    edition = "2021",
+    env = {
+        "INNER_FILESERVER_BIN": "$(rlocationpath //mcps-demo-fileserver:mcps_demo_fileserver_bin)",
+    },
+    deps = [
+        ":mcps_demo",
+        "//mcps-core:mcps_core",
+        "//mcps-host:mcps_host",
+        "//mcps-proxy:mcps_proxy",
+        "//mcps-test-paths:mcps_test_paths",
+        "@crates_mcps//:serde_json",
+    ],
+)
+
 # MCPS-049 (MCPS-EPIC-P6 Child Issue 5): the COHESIVE positive happy-path,
 # end-to-end. The demo HostSession CLIENT signs ONE authorized list_files; the
 # policy-enabled demo proxy verifies the Core envelope, checks freshness/replay,
