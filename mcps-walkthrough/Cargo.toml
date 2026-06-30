@@ -1,0 +1,22 @@
+[package]
+name = "mcps-walkthrough"
+version = "0.6.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The MCP-S persona-ladder walkthrough (ADR-MCPS-045): runnable, real-subprocess four-hop tiers (T0..T3) that each demonstrate one new security concept. The README is the ladder."
+
+[dependencies]
+# The harness reuses the demo building blocks rather than duplicating them:
+# DemoFixtures mints the mTLS material + trust file + seeds; AudienceTuple builds
+# the canonical audience string both proxies must agree on; mcps-test-paths
+# resolves the proxy + fileserver binaries under Bazel runfiles OR cargo.
+mcps-demo = { path = "../mcps-demo" }
+mcps-client-core = { path = "../mcps-client-core" }
+mcps-core = { path = "../mcps-core" }
+mcps-test-paths = { path = "../mcps-test-paths" }
+serde_json = { workspace = true }
+
+[lib]
+name = "mcps_walkthrough"
+path = "src/lib.rs"

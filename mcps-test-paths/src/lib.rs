@@ -51,6 +51,7 @@ fn cargo_fallback(env_key: &str) -> PathBuf {
     match env_key {
         // Same-crate bins
         "MCPS_PROXY_CLI" => find_bin(&workspace_root, "mcps-proxy"),
+        "MCPS_CLIENT_PROXY_CLI" => find_bin(&workspace_root, "mcps-client-proxy-cli"),
         "MCPS_STDIO_SERVER" => find_bin(&workspace_root, "mcps-stdio-server"),
         "DEMO_SERVER_BIN" => find_bin(&workspace_root, "mcps-demo-server"),
         "INNER_FILESERVER_BIN" | "DEMO_FILESERVER_BIN" => {

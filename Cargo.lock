@@ -786,6 +786,7 @@ dependencies = [
  "hmac",
  "landlock",
  "libc",
+ "mcps-client-core",
  "mcps-core",
  "mcps-host",
  "mcps-policy",
@@ -820,6 +821,17 @@ dependencies = [
  "rustls-pki-types",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "mcps-walkthrough"
+version = "0.6.0"
+dependencies = [
+ "mcps-client-core",
+ "mcps-core",
+ "mcps-demo",
+ "mcps-test-paths",
+ "serde_json",
 ]
 
 [[package]]

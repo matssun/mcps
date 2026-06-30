@@ -24,6 +24,7 @@ members = [
     "mcps-demo-fileserver", # Phase 6.5 demo target — ordinary MCP-S-unaware stdio server
     "mcps-demo-server", # Phase 6.6B demo target — ordinary MCP-S-unaware LONG-LIVED stdio server
     "mcps-demo",        # Phase 6.5 demo harness — host-side HostSession demo client
+    "mcps-walkthrough", # ADR-MCPS-045 persona-ladder walkthrough — real-subprocess four-hop tiers (T0..T3)
     "mcps-test-paths",  # Test-only: resolve binaries + data fixtures under Bazel runfiles OR Cargo
 ]
 

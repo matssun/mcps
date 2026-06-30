@@ -1,0 +1,68 @@
+load("//bazel:defs.bzl", "nt_rust_library", "nt_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# ADR-MCPS-045: the persona-ladder walkthrough harness. The library spins up the
+# real four-hop topology (ordinary client -> mcps-client-proxy-cli -> mcps-proxy
+# -> mcps-demo-fileserver) as separate OS processes over mTLS-on-loopback, reusing
+# DemoFixtures (mTLS material/trust) and AudienceTuple (the canonical audience
+# both proxies must agree on). One test file per tier consumes it.
+nt_rust_library(
+    name = "mcps_walkthrough",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "mcps_walkthrough",
+    edition = "2021",
+    deps = [
+        "//mcps-client-core:mcps_client_core",
+        "//mcps-core:mcps_core",
+        "//mcps-demo:mcps_demo",
+        "//mcps-test-paths:mcps_test_paths",
+        "@crates_mcps//:serde_json",
+    ],
+)
+
+# The three real binaries every tier spawns, delivered via runfiles and resolved
+# by mcps-test-paths from the matching $(rlocationpath ...) env keys.
+_TIER_DATA = [
+    "//mcps-client-proxy-cli:mcps_client_proxy_cli",
+    "//mcps-proxy:mcps_proxy_cli",
+    "//mcps-demo-fileserver:mcps_demo_fileserver_bin",
+]
+
+_TIER_ENV = {
+    "MCPS_CLIENT_PROXY_CLI": "$(rlocationpath //mcps-client-proxy-cli:mcps_client_proxy_cli)",
+    "MCPS_PROXY_CLI": "$(rlocationpath //mcps-proxy:mcps_proxy_cli)",
+    "INNER_FILESERVER_BIN": "$(rlocationpath //mcps-demo-fileserver:mcps_demo_fileserver_bin)",
+}
+
+# T0 — "Hello, signed call": one signed tools/call round-trips all four hops as
+# plain MCP (object signing + response binding; no authorization yet).
+nt_rust_test(
+    name = "t0_hello_signed_call",
+    srcs = ["tests/t0_hello_signed_call.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    data = _TIER_DATA,
+    edition = "2021",
+    env = _TIER_ENV,
+    deps = [
+        ":mcps_walkthrough",
+        "@crates_mcps//:serde_json",
+    ],
+)
+
+# T1 — "Real tools, fail closed": read/write/stat/list over the signed channel,
+# plus a demo-root escape that fails closed as a clean plain-MCP error.
+nt_rust_test(
+    name = "t1_real_tools_fail_closed",
+    srcs = ["tests/t1_real_tools_fail_closed.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    data = _TIER_DATA,
+    edition = "2021",
+    env = _TIER_ENV,
+    deps = [
+        ":mcps_walkthrough",
+        "@crates_mcps//:serde_json",
+    ],
+)
