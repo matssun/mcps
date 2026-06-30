@@ -82,6 +82,9 @@ use crate::crypto::ensure_ed25519_alg;
 use crate::crypto::verify_ed25519;
 use crate::crypto::verify_ed25519_with;
 use crate::error::McpsError;
+use crate::ids::REQUEST_META_KEY;
+use crate::ids::VERSION_DRAFT_01;
+use crate::ids::VERSION_DRAFT_02;
 use crate::replay::ReplayCache;
 use crate::replay::ReplayDecision;
 use crate::resolver::TrustResolver;
@@ -570,6 +573,137 @@ pub fn verify_response_draft02(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Dual verifier — strict version dispatch + required expected-version policy.
+// ADR-MCPS-041 / decision G.1.
+// ---------------------------------------------------------------------------
+
+/// The operator's expected-version security posture — a **required, explicit**
+/// input (ADR-MCPS-041 / decision G.1). There is deliberately **no `Default`**:
+/// a deployment must declare its posture, because defaulting either way is the
+/// implicit fallback the project rejects (draft-02-only would silently break
+/// deployed draft-01 clients; dual-accept would silently open a downgrade-
+/// acceptance hole). A service that has not configured this must fail closed at
+/// startup — see [`ExpectedVersionPolicy::from_config`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectedVersionPolicy {
+    /// The **recommended** production posture: only `draft-02` evidence is
+    /// accepted; a `draft-01` envelope is refused as a downgrade.
+    Draft02Only,
+    /// An explicit **migration** posture: both `draft-01` and `draft-02` are
+    /// accepted, each verified strictly by its own profile (never cross-accepted).
+    Draft01AndDraft02,
+}
+
+impl ExpectedVersionPolicy {
+    /// Resolve the policy from an operator-supplied configuration value, failing
+    /// closed at startup when it is **unset** or unrecognized (decision G.1). The
+    /// accepted tokens are `"draft-02-only"` and `"draft-01-and-draft-02"`.
+    pub fn from_config(value: Option<&str>) -> Result<Self, VersionPolicyError> {
+        match value {
+            None => Err(VersionPolicyError::Unset),
+            Some("draft-02-only") => Ok(ExpectedVersionPolicy::Draft02Only),
+            Some("draft-01-and-draft-02") => Ok(ExpectedVersionPolicy::Draft01AndDraft02),
+            Some(other) => Err(VersionPolicyError::Unrecognized(other.to_string())),
+        }
+    }
+
+    /// Whether this posture admits the given (recognized) wire `version`.
+    fn admits(self, version: &str) -> bool {
+        match self {
+            ExpectedVersionPolicy::Draft02Only => version == VERSION_DRAFT_02,
+            ExpectedVersionPolicy::Draft01AndDraft02 => {
+                version == VERSION_DRAFT_01 || version == VERSION_DRAFT_02
+            }
+        }
+    }
+}
+
+/// A configuration-time failure resolving the [`ExpectedVersionPolicy`]. This is
+/// a STARTUP error, distinct from the wire [`McpsError`] taxonomy: the service
+/// must not start (fail closed) rather than infer a posture.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VersionPolicyError {
+    /// No expected-version policy was configured. The service must fail closed
+    /// at startup rather than choose a posture for the operator.
+    #[error("expected-version policy is required but was not configured")]
+    Unset,
+    /// The configured value is not a recognized policy token.
+    #[error("unrecognized expected-version policy: {0}")]
+    Unrecognized(String),
+}
+
+/// Verify a signed MCP-S request through the **dual verifier** with strict
+/// version dispatch (ADR-MCPS-041 / decision G.1). `envelope.version` is the
+/// SOLE profile selector, read as an untrusted selector and then enforced
+/// exactly by the chosen profile:
+///
+/// - unknown/unrecognized version → [`McpsError::UnsupportedVersion`]
+///   ("cannot select a known profile");
+/// - a recognized version the `policy` forbids (e.g. `draft-01` under
+///   [`ExpectedVersionPolicy::Draft02Only`]) → [`McpsError::DowngradeForbidden`]
+///   ("recognized the lower profile, policy forbids it");
+/// - `draft-01` → the draft-01 verifier ONLY; `draft-02` → the draft-02 verifier
+///   ONLY. **No fallback-retry, no cross-acceptance** — each profile rejects the
+///   other's evidence.
+///
+/// The `policy` argument is required by the type system, so there is no way to
+/// dispatch without an explicit posture (the startup fail-closed of
+/// [`ExpectedVersionPolicy::from_config`] handles the operator-config side).
+pub fn verify_request_dispatch(
+    raw_bytes: &[u8],
+    resolver: &dyn TrustResolver,
+    replay: &mut dyn ReplayCache,
+    config: &VerificationConfig,
+    now_unix: i64,
+    policy: ExpectedVersionPolicy,
+) -> Result<VerifiedRequest, McpsError> {
+    let value: Value =
+        serde_json::from_slice(raw_bytes).map_err(|_| McpsError::CanonicalizationFailed)?;
+
+    // Structural rejects first (version-agnostic), so a batch/notification
+    // surfaces its precise token rather than a missing-envelope incidental.
+    reject_batch(&value)?;
+    reject_notification(&value)?;
+
+    // Read the untrusted version selector from the located request envelope.
+    let version = read_request_envelope_version(&value)?;
+
+    // Recognized profile? (downgrade defense distinguishes the two outcomes.)
+    let recognized = version == VERSION_DRAFT_01 || version == VERSION_DRAFT_02;
+    if !recognized {
+        return Err(McpsError::UnsupportedVersion);
+    }
+    if !policy.admits(&version) {
+        // Recognized the (lower) profile, policy forbids it.
+        return Err(McpsError::DowngradeForbidden);
+    }
+
+    // Dispatch to exactly one profile; no fallback. The chosen verifier re-reads
+    // and enforces the exact signed version.
+    if version == VERSION_DRAFT_01 {
+        verify_request(raw_bytes, resolver, replay, config, now_unix)
+    } else {
+        verify_request_draft02(raw_bytes, resolver, replay, config, now_unix)
+    }
+}
+
+/// Read the request envelope's `version` as an untrusted selector. Missing
+/// envelope → [`McpsError::MissingEnvelope`]; absent/non-string version →
+/// [`McpsError::UnsupportedVersion`] (no profile can be selected).
+fn read_request_envelope_version(value: &Value) -> Result<String, McpsError> {
+    let envelope = value
+        .get("params")
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get(REQUEST_META_KEY))
+        .ok_or(McpsError::MissingEnvelope)?;
+    envelope
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or(McpsError::UnsupportedVersion)
+}
+
 /// Step 7 — `authorization_hash` must be present, non-empty, and `sha256:`-
 /// prefixed. Absent/empty/malformed all -> [`McpsError::AuthorizationHashMissing`]
 /// (documented choice; fails closed without a separate format error).
@@ -608,11 +742,14 @@ mod tests {
     use super::check_on_behalf_of;
     use super::check_signature_block;
     use super::verify_request;
+    use super::verify_request_dispatch;
     use super::verify_request_draft02;
     use super::verify_response;
     use super::verify_response_draft02;
+    use super::ExpectedVersionPolicy;
     use super::VerificationConfig;
     use super::VerifiedAuthorization;
+    use super::VersionPolicyError;
     use crate::crypto::SigningKey;
     use crate::error::McpsError;
     use crate::ids::REQUEST_META_KEY;
@@ -1026,6 +1163,157 @@ mod tests {
         assert_eq!(
             verify_request_draft02(&raw, &signer_resolver(), &mut replay, &config(), ISSUED_EPOCH + 60),
             Err(McpsError::CanonicalizationIdMissing)
+        );
+    }
+
+    // ---- Dual verifier: dispatch + policy (ADR-MCPS-041 / decision G.1) ------
+
+    #[test]
+    fn expected_version_policy_unset_fails_closed_at_config() {
+        // The startup fail-closed: no policy configured => the service must not
+        // start (decision G.1 — no default posture).
+        assert_eq!(
+            ExpectedVersionPolicy::from_config(None),
+            Err(VersionPolicyError::Unset)
+        );
+        assert_eq!(
+            ExpectedVersionPolicy::from_config(Some("draft-02-only")),
+            Ok(ExpectedVersionPolicy::Draft02Only)
+        );
+        assert_eq!(
+            ExpectedVersionPolicy::from_config(Some("draft-01-and-draft-02")),
+            Ok(ExpectedVersionPolicy::Draft01AndDraft02)
+        );
+        assert!(matches!(
+            ExpectedVersionPolicy::from_config(Some("loose")),
+            Err(VersionPolicyError::Unrecognized(_))
+        ));
+    }
+
+    #[test]
+    fn dispatch_routes_draft01_and_draft02_by_version() {
+        // draft-02 under the recommended draft-02-only posture verifies.
+        let raw2 = signed_request_draft02("req-1", "hello");
+        let mut replay = InMemoryReplayCache::new(SKEW);
+        let v2 = verify_request_dispatch(
+            &raw2,
+            &signer_resolver(),
+            &mut replay,
+            &config(),
+            ISSUED_EPOCH + 60,
+            ExpectedVersionPolicy::Draft02Only,
+        )
+        .expect("draft-02 dispatches");
+        assert!(v2.canonicalization_id.is_some());
+
+        // draft-01 under the migration posture verifies (its own profile).
+        let raw1 = signed_request("req-2", "hello");
+        let mut replay = InMemoryReplayCache::new(SKEW);
+        let v1 = verify_request_dispatch(
+            &raw1,
+            &signer_resolver(),
+            &mut replay,
+            &config(),
+            ISSUED_EPOCH + 60,
+            ExpectedVersionPolicy::Draft01AndDraft02,
+        )
+        .expect("draft-01 dispatches");
+        assert!(v1.canonicalization_id.is_none());
+        assert!(matches!(
+            v1.authorization,
+            VerifiedAuthorization::Draft01Hash { .. }
+        ));
+    }
+
+    #[test]
+    fn dispatch_draft01_under_draft02_only_is_downgrade_forbidden() {
+        // Recognized lower profile, policy forbids it -> downgrade_forbidden
+        // (NOT unsupported_version).
+        let raw = signed_request("req-1", "hello");
+        let mut replay = InMemoryReplayCache::new(SKEW);
+        assert_eq!(
+            verify_request_dispatch(
+                &raw,
+                &signer_resolver(),
+                &mut replay,
+                &config(),
+                ISSUED_EPOCH + 60,
+                ExpectedVersionPolicy::Draft02Only,
+            ),
+            Err(McpsError::DowngradeForbidden)
+        );
+    }
+
+    #[test]
+    fn dispatch_unknown_version_is_unsupported_not_downgrade() {
+        // A version that names no known profile -> unsupported_version under any
+        // policy (cannot select a profile at all).
+        let mut obj = request_unsigned("req-1", "hello");
+        obj["params"]["_meta"][REQUEST_META_KEY]["version"] = json!("draft-99");
+        let raw = serde_json::to_vec(&obj).expect("serialize");
+        let mut replay = InMemoryReplayCache::new(SKEW);
+        for policy in [
+            ExpectedVersionPolicy::Draft02Only,
+            ExpectedVersionPolicy::Draft01AndDraft02,
+        ] {
+            assert_eq!(
+                verify_request_dispatch(
+                    &raw,
+                    &signer_resolver(),
+                    &mut replay,
+                    &config(),
+                    ISSUED_EPOCH + 60,
+                    policy,
+                ),
+                Err(McpsError::UnsupportedVersion)
+            );
+        }
+    }
+
+    #[test]
+    fn no_cross_acceptance_between_profiles() {
+        // Each verifier rejects the other's evidence — no fallback. The draft-01
+        // verifier rejects the draft-02 envelope via deny_unknown_fields (the
+        // draft-02-only fields are unknown to it); the draft-02 verifier rejects
+        // the draft-01 envelope at the version selector.
+        let raw2 = signed_request_draft02("req-1", "hello");
+        let mut replay = InMemoryReplayCache::new(SKEW);
+        assert_eq!(
+            verify_request(&raw2, &signer_resolver(), &mut replay, &config(), ISSUED_EPOCH + 60),
+            Err(McpsError::UnknownEnvelopeField),
+            "the draft-01 verifier must reject draft-02 evidence"
+        );
+        let raw1 = signed_request("req-1", "hello");
+        let mut replay = InMemoryReplayCache::new(SKEW);
+        assert_eq!(
+            verify_request_draft02(&raw1, &signer_resolver(), &mut replay, &config(), ISSUED_EPOCH + 60),
+            Err(McpsError::UnsupportedVersion),
+            "the draft-02 verifier must reject draft-01 evidence"
+        );
+    }
+
+    #[test]
+    fn draft01_no_leak_rejects_draft02_only_field() {
+        // A draft-01 envelope carrying a draft-02-only field (canonicalization_id)
+        // is rejected by deny_unknown_fields — the draft-02 surface never leaks
+        // into the draft-01 profile.
+        let mut obj = request_unsigned("req-1", "hello");
+        obj["params"]["_meta"][REQUEST_META_KEY]
+            .as_object_mut()
+            .unwrap()
+            .insert("canonicalization_id".into(), json!("mcps-jcs-int53-json-v1"));
+        let raw = serde_json::to_vec(&obj).expect("serialize");
+        let mut replay = InMemoryReplayCache::new(SKEW);
+        assert_eq!(
+            verify_request_dispatch(
+                &raw,
+                &signer_resolver(),
+                &mut replay,
+                &config(),
+                ISSUED_EPOCH + 60,
+                ExpectedVersionPolicy::Draft01AndDraft02,
+            ),
+            Err(McpsError::UnknownEnvelopeField)
         );
     }
 
