@@ -16,6 +16,7 @@ members = [
     "mcps-conformance", # Black-box conformance runner (object + stdio + HTTP harnesses)
     "mcps-proxy",       # Server-side sidecar (stdio-first)
     "mcps-host",        # Client-side ambassador (request signing, response verification)
+    "mcps-client-core", # Client-side shared seam for proxy + SDK (ADR-MCPS-044) — signed draft-02 requests, response binding
     "mcps-transport",   # Client-side mTLS transport (MCPS-053 — verifying rustls client)
     "mcps-policy",      # Delegation/authorization profiles (Phase 5 — placeholder)
     "mcps-demo-fileserver", # Phase 6.5 demo target — ordinary MCP-S-unaware stdio server

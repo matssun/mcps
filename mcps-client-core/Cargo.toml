@@ -1,0 +1,20 @@
+[package]
+name = "mcps-client-core"
+version = "0.6.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MCP-S client-side core — the shared seam (consumed by the client proxy and SDK) that constructs signed draft-02 requests and binds responses. Pure: no networking/async/fs."
+
+[dependencies]
+# MCPS-40 (ADR-MCPS-044 §mcps-client-core seam): the client core is the shared
+# evidence-construction / verification seam below the proxy and SDK. It reuses
+# mcps-core's pure primitives (JCS canonicalization, request_hash, Ed25519) and
+# the frozen draft-02 envelope/error vocabulary; it MUST NOT pull in any
+# networking/async/fs crate (those are the mode-specific layers above this seam).
+mcps-core = { path = "../mcps-core" }
+serde_json = { workspace = true }
+
+[lib]
+name = "mcps_client_core"
+path = "src/lib.rs"
