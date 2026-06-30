@@ -54,10 +54,16 @@
 //!   pre-discovery; mandatory tenant/route discriminators; discovery can never
 //!   choose/widen/rewrite the audience.
 //!
-//! Discovery and audit/error mapping land in the following sprint slices on top of
-//! this seam.
+//! - MCPS-48 (#195): the client error→`wire_code()` mapping + audit events
+//!   ([`ClientAuditEvent`] / [`audit_for_decision`] /
+//!   [`correlation::CorrelationError::to_mcps_error`]) — no parallel wire taxonomy;
+//!   audit events distinguish verified vs legacy-explicit paths.
+//!
+//! Stateless-primary discovery lands in the following sprint slice on top of this
+//! seam.
 
 pub mod audience;
+pub mod audit;
 pub mod authz;
 pub mod correlation;
 pub mod enforcement;
@@ -71,6 +77,10 @@ pub use audience::AudienceTuple;
 pub use audience::SignerAudienceBinding;
 pub use audience::SignerAudiencePolicy;
 pub use audience::TransportIdentity;
+pub use audit::audit_for_decision;
+pub use audit::ClientAuditEvent;
+pub use audit::ClientOutcome;
+pub use audit::ClientPath;
 pub use authz::binding_tag;
 pub use authz::resolve_authorization_binding;
 pub use authz::AuthorizationBindingPolicy;

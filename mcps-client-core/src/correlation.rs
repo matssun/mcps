@@ -19,6 +19,7 @@
 //! owns no clock. The mode-specific layer drives `sweep_expired` on a timer and
 //! supplies wall-clock time.
 
+use mcps_core::McpsError;
 use std::collections::HashMap;
 
 /// Everything retained for one outstanding request, captured at send time.
@@ -61,6 +62,24 @@ pub enum CorrelationError {
     Uncorrelatable,
     /// The pending entry exists but its deadline has passed.
     Expired,
+}
+
+impl CorrelationError {
+    /// Map this local correlation failure to the frozen `mcps-core` wire taxonomy
+    /// (MCPS-48): the client never invents a parallel wire reason. A duplicate id or
+    /// nonce reuse is a replay ([`McpsError::ReplayDetected`]); an uncorrelatable
+    /// (late-after-cleanup) response cannot be bound to any request, a response-
+    /// binding failure ([`McpsError::ResponseHashMismatch`]); an expired entry is
+    /// [`McpsError::ExpiredRequest`].
+    pub fn to_mcps_error(self) -> McpsError {
+        match self {
+            CorrelationError::DuplicateCorrelationId | CorrelationError::NonceReuse => {
+                McpsError::ReplayDetected
+            }
+            CorrelationError::Uncorrelatable => McpsError::ResponseHashMismatch,
+            CorrelationError::Expired => McpsError::ExpiredRequest,
+        }
+    }
 }
 
 /// Per-outstanding-request correlation store with nonce-reuse prevention and an
