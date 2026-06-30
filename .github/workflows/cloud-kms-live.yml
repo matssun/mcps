@@ -163,3 +163,12 @@ jobs:
           --features gcp_kms_keysource
           --test gcp_kms_live_test
           -- --ignored gcp_kms_signature_verifies_under_mcps_core
+      - name: Run GCP Cloud KMS draft-02 (v0.6) envelope verification (#[ignore], real endpoint)
+        # Cloud KMS signs a COMPLETE draft-02 request + response (over the
+        # protected version + canonicalization_id + authorization_binding
+        # preimage) that the unmodified draft-02 verifier accepts. Same secrets.
+        run: >-
+          cargo test -p mcps-proxy
+          --features gcp_kms_keysource
+          --test gcp_kms_draft02_live_test
+          -- --ignored

@@ -140,6 +140,15 @@ cargo test -p mcps-proxy --features gcp_kms_keysource \
 cargo test -p mcps-proxy --features gcp_kms_keysource \
   --test gcp_kms_delegated_tls_live_test -- --ignored --nocapture --test-threads=1
 
+# 3. Draft-02 (v0.6) envelope lane: Cloud KMS signs a COMPLETE draft-02 request
+#    and response — over the protected version + canonicalization_id +
+#    authorization_binding preimage — that the unmodified draft-02 verifier
+#    (verify_request_draft02 / verify_response_draft02) accepts, with tamper and
+#    wrong-key negatives.
+cargo test -p mcps-proxy --features gcp_kms_keysource \
+  --test gcp_kms_draft02_live_test -- --ignored --nocapture --test-threads=1
+
 echo
-echo "OK — live GCP KMS validation passed (object signing + delegated TLS, with"
-echo "negatives). The private keys never left Cloud KMS."
+echo "OK — live GCP KMS validation passed (object signing + delegated TLS +"
+echo "draft-02 envelope round-trip, with negatives). The private keys never left"
+echo "Cloud KMS."
