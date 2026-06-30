@@ -31,12 +31,12 @@ without binding the transport identity (that's a later rung).
 | **T0** Hello, signed call | An individual, "just see it work" | object signing + response binding (authenticity), end to end | `cargo test -p mcps-walkthrough --test t0_hello_signed_call` |
 | **T1** Real tools, fail closed | …maturing | real `read`/`write`/`stat`/`list` over the signed channel + a fail-closed input | `cargo test -p mcps-walkthrough --test t1_real_tools_fail_closed` |
 | **T2** Internal roles | Small company, internal | scoped authorization — reader vs admin; a reader's write is **denied before dispatch** | `cargo test -p mcps-demo --test demo_scope_test` |
-| **T3** External users | Small company, external | mTLS identity binding + transport/protocol negatives + the cross-process received-log deny proof | *(upcoming)* |
+| **T3** External users | Small company, external | mTLS identity binding (`--transport-binding exact`) + a server-name negative + the cross-process received-log deny proof | `cargo test -p mcps-walkthrough --test t3_external_users_transport_binding` |
 | **T4** Enterprise key custody | Larger enterprise | client + server signing keys in cloud KMS (non-exporting) | *(upcoming, cloud)* |
 
-T0–T3 run offline with `cargo test`. T2 is currently demonstrated in-process in
-`mcps-demo` (`demo_scope_test`); the four-hop variants land as the ladder fills
-out. T4 is env-gated against a live cloud project.
+T0–T3 run offline with `cargo test`. T0, T1, and T3 run the real four-hop; T2 is
+currently demonstrated in-process in `mcps-demo` (`demo_scope_test`), with its
+four-hop variant to follow. T4 is env-gated against a live cloud project.
 
 ## How a rung is built
 
