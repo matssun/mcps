@@ -125,10 +125,27 @@ the live-cloud script. The ladder maps onto the phases:
     — a client cannot learn a TRUSTED rejection reason over an untrusted channel —
     is addressed by [046](adr-mcps-046.md) (Signed Rejection Receipts), a separate
     protocol feature; T3 deliberately does not pre-empt it.
-- **Phase 4** — client-side GCP KMS signer in `mcps-client-core` + live lane →
-  **T4**.
-- **Phase 5** — sanitized two-version model (real `work/` script gitignored; a
-  committed placeholder template; tracked-file leak guard).
+- **Phase 4** (client KMS signer DONE) — a non-exporting Cloud KMS **client**
+  signer (`KmsClientSigner` in `mcps-client-proxy-cli`, behind the optional
+  `gcp_kms` feature) bridges `mcps-client-core`'s `ClientSigner` to the
+  live-tested `GcpKmsEd25519Backend` from `mcps-proxy` (reuse-in-place; a default
+  build stays software+mTLS). GCP Cloud KMS natively supports Ed25519
+  (`EC_SIGN_ED25519`), so the key is held in KMS and signs the same PureEdDSA
+  preimage — no alg substitution. Proven OFFLINE via the no-network fake backend
+  (a KMS-bridge signature verifies under the unmodified `mcps-core` verifier;
+  custody `NonExporting` passes the hardening profile) and LIVE via an `#[ignore]`
+  client lane + the cloud script. `--key-source gcp-kms` enforces the
+  non-exporting profile; a default build refuses it rather than degrading.
+  *Follow-up:* extract the KMS backend into a neutral shared crate so the client
+  need not depend on the server crate; the full four-hop T4 (BOTH identities in
+  KMS over the socket) runs from the cloud script with two distinct KMS keys.
+- **Phase 5** (DONE) — sanitized two-version model: the real `work/` script stays
+  gitignored; a committed placeholder (`scripts/test-gcp-cloud.sh.example`, all
+  identifiers replaced) documents the full lane incl. the client KMS key; and a
+  tracked-file leak guard (`mcps-walkthrough/tests/no_tracked_secrets.rs`) asserts
+  — via `git grep` over tracked files only, with the forbidden identifiers
+  assembled from fragments so the guard is not itself the leak — that no real
+  account/project identifier is ever committed.
 
 ### D4 — One discoverable home, runnable in one command per tier
 

@@ -1,0 +1,116 @@
+#!/bin/bash
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SANITIZED TEMPLATE for the live GCP Cloud KMS validation lane (ADR-MCPS-045
+# Phase 4/5 + ADR-MCPS-028). Copy to a LOCAL, UNTRACKED path and fill in your own
+# project before running:
+#
+#     cp scripts/test-gcp-cloud.sh.example work/test-gcp-cloud.sh   # work/ is gitignored
+#     # edit the placeholders below, then:
+#     ./work/test-gcp-cloud.sh
+#
+# DO NOT commit a filled-in copy. The real account/project identifiers are
+# personal; keep them only in the gitignored work/ copy. A tracked-file leak
+# guard (cargo test -p mcps-walkthrough --test no_tracked_secrets) asserts none of
+# the real identifiers ever land in a tracked file.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Required GCP setup (placeholders — replace ALL of them):
+#   account        = YOUR_GCP_ACCOUNT@example.com
+#   PROJECT_ID     = your-project-id
+#   PROJECT_NUMBER = your-project-number
+#
+# NOTE: KMS keyrings and keys cannot be deleted, so create is run only once;
+# subsequent runs find the existing resources and skip creation.
+
+export PROJECT_ID="your-project-id"
+export LOCATION="global"
+export KEY_RING="mcps-test-ring"
+export KEY_NAME="mcps-ed25519-object"        # server response-signing identity
+export CLIENT_KEY_NAME="mcps-ed25519-client" # client request-signing identity (T4)
+export RSA_KEY_NAME="mcps-rsa-object"
+export TLS_KEY_NAME="mcps-ed25519-tls"
+
+gcloud config set project "$PROJECT_ID"
+gcloud services enable cloudkms.googleapis.com
+
+# Idempotent keyring creation
+if gcloud kms keyrings describe "$KEY_RING" --location "$LOCATION" >/dev/null 2>&1; then
+  echo "keyring $KEY_RING already exists, skipping"
+else
+  gcloud kms keyrings create "$KEY_RING" --location "$LOCATION"
+fi
+
+# Helper: idempotently create an EC_SIGN_ED25519 signing key.
+ensure_ed25519_key() {
+  local name="$1"
+  if gcloud kms keys describe "$name" \
+       --keyring "$KEY_RING" --location "$LOCATION" >/dev/null 2>&1; then
+    echo "key $name already exists, skipping"
+  else
+    gcloud kms keys create "$name" \
+      --keyring "$KEY_RING" \
+      --location "$LOCATION" \
+      --purpose "asymmetric-signing" \
+      --default-algorithm "ec-sign-ed25519" \
+      --protection-level "software"
+  fi
+}
+
+# Server response-signing key (object signing).
+ensure_ed25519_key "$KEY_NAME"
+
+# Client request-signing key — a DISTINCT identity from the server key (T4 has
+# BOTH client and server signing keys in Cloud KMS).
+ensure_ed25519_key "$CLIENT_KEY_NAME"
+
+# NON-Ed25519 (RSA) key — exercises gcp_kms_non_ed25519_key_rejected.
+if gcloud kms keys describe "$RSA_KEY_NAME" \
+     --keyring "$KEY_RING" --location "$LOCATION" >/dev/null 2>&1; then
+  echo "key $RSA_KEY_NAME already exists, skipping"
+else
+  gcloud kms keys create "$RSA_KEY_NAME" \
+    --keyring "$KEY_RING" \
+    --location "$LOCATION" \
+    --purpose "asymmetric-signing" \
+    --default-algorithm "rsa-sign-pkcs1-2048-sha256" \
+    --protection-level "software"
+fi
+
+# SECOND Ed25519 key for DELEGATED TLS (ADR-MCPS-028 §G) — distinct from the
+# response-signing key; its private key never leaves KMS.
+ensure_ed25519_key "$TLS_KEY_NAME"
+
+key_version() {
+  echo "projects/$PROJECT_ID/locations/$LOCATION/keyRings/$KEY_RING/cryptoKeys/$1/cryptoKeyVersions/1"
+}
+export MCPS_GCP_KEY_VERSION="$(key_version "$KEY_NAME")"
+export MCPS_GCP_KEY_VERSION_CLIENT="$(key_version "$CLIENT_KEY_NAME")"
+export MCPS_GCP_KEY_VERSION_RSA="$(key_version "$RSA_KEY_NAME")"
+export MCPS_GCP_KEY_VERSION_TLS="$(key_version "$TLS_KEY_NAME")"
+export MCPS_GCP_ACCESS_TOKEN="$(gcloud auth print-access-token)"
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Run ONLY the GCP live test targets -> no "0 tests" wall from other binaries.
+
+# 1. SERVER object-signing lane (positive + 3 negatives).
+cargo test -p mcps-proxy --features gcp_kms_keysource \
+  --test gcp_kms_live_test -- --ignored --nocapture
+
+# 2. SERVER delegated-TLS lane: the TLS private key stays in GCP KMS; a real mTLS
+#    handshake completes only if the cloud signed it.
+cargo test -p mcps-proxy --features gcp_kms_keysource \
+  --test gcp_kms_delegated_tls_live_test -- --ignored --nocapture
+
+# 3. SERVER draft-02 (v0.6) envelope lane: Cloud KMS signs a COMPLETE draft-02
+#    request and response that the unmodified draft-02 verifier accepts.
+cargo test -p mcps-proxy --features gcp_kms_keysource \
+  --test gcp_kms_draft02_live_test -- --ignored --nocapture
+
+# 4. CLIENT-side KMS signer (ADR-MCPS-045 Phase 4 / Tier T4): the client request
+#    signer's private key lives in Cloud KMS. Uses MCPS_GCP_KEY_VERSION_CLIENT.
+MCPS_GCP_KEY_VERSION="$MCPS_GCP_KEY_VERSION_CLIENT" \
+cargo test -p mcps-client-proxy-cli --features gcp_kms \
+  -- --ignored --nocapture

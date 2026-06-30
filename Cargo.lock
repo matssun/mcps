@@ -684,6 +684,7 @@ dependencies = [
  "mcps-client-proxy",
  "mcps-core",
  "mcps-host",
+ "mcps-proxy",
  "mcps-transport",
  "serde_json",
 ]
