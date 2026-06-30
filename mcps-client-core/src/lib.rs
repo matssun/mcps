@@ -59,13 +59,20 @@
 //!   [`correlation::CorrelationError::to_mcps_error`]) — no parallel wire taxonomy;
 //!   audit events distinguish verified vs legacy-explicit paths.
 //!
-//! Stateless-primary discovery lands in the following sprint slice on top of this
-//! seam.
+//! - MCPS-44 (#191): stateless-primary discovery ([`ProvenSupport`] minted only
+//!   from a verified exchange), the advisory [`LegacyAdvert`] parser + [`AdvertCache`]
+//!   (cacheable, non-authoritative, no downgrade), and the capability-mismatch
+//!   verdicts ([`evaluate_capability`]).
+//!
+//! With this slice the pure client seam is feature-complete; the local proxy
+//! (#196), conformance corpus (#197), dev probe (#200), and e2e topology (#198)
+//! consume it above.
 
 pub mod audience;
 pub mod audit;
 pub mod authz;
 pub mod correlation;
+pub mod discovery;
 pub mod enforcement;
 pub mod request;
 pub mod response;
@@ -95,6 +102,15 @@ pub use authz::StructuredObjectHashingProvider;
 pub use correlation::CorrelationError;
 pub use correlation::CorrelationStore;
 pub use correlation::PendingRequest;
+pub use discovery::advert_mismatch;
+pub use discovery::evaluate_capability;
+pub use discovery::parse_legacy_advert;
+pub use discovery::AdvertCache;
+pub use discovery::CapabilityPolicy;
+pub use discovery::CapabilityVerdict;
+pub use discovery::ExchangeCapability;
+pub use discovery::LegacyAdvert;
+pub use discovery::ProvenSupport;
 pub use enforcement::classify_response_result;
 pub use enforcement::decide;
 pub use enforcement::AbsenceReason;

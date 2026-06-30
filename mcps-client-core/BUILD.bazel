@@ -121,3 +121,18 @@ nt_rust_test(
         "@crates_mcps//:serde_json",
     ],
 )
+
+# MCPS-44: the first verified exchange is proof+discovery; a stripped/tampered
+# advisory advert never changes the capability verdict (no downgrade).
+nt_rust_test(
+    name = "discovery_test",
+    srcs = ["tests/discovery_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_client_core",
+        "//mcps-core:mcps_core",
+        "@crates_mcps//:serde_json",
+    ],
+)
