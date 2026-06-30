@@ -38,13 +38,20 @@
 //!   forms, route type-policy enforcement, structured-hashing rejected in base
 //!   (bind-not-interpret; the binding is placed in the signed preimage).
 //!
-//! Signer custody, the correlation store, signer→audience binding, discovery, and
-//! audit/error mapping land in the following sprint slices on top of this seam.
+//! - MCPS-46 (#193): the [`ClientSigner`] custody abstraction + [`SignerPolicy`]
+//!   gate ([`authorize_signer`] / [`build_signed_request_with_signer`]) —
+//!   mechanism-neutral signing, signer identified in evidence, dev-file keys
+//!   rejected under production `require_mcps`, rotation/revocation by config,
+//!   hardware/KMS-only as an opt-in hardening profile.
+//!
+//! The correlation store, signer→audience binding, discovery, and audit/error
+//! mapping land in the following sprint slices on top of this seam.
 
 pub mod authz;
 pub mod enforcement;
 pub mod request;
 pub mod response;
+pub mod signer;
 
 pub use authz::binding_tag;
 pub use authz::resolve_authorization_binding;
@@ -69,3 +76,11 @@ pub use request::RequestSigningInputs;
 pub use request::SignedRequest;
 pub use response::verify_signed_response;
 pub use response::ResponseExpectation;
+pub use signer::authorize_signer;
+pub use signer::build_signed_request_with_signer;
+pub use signer::ClientSigner;
+pub use signer::CustodyClass;
+pub use signer::DevFileSigner;
+pub use signer::Environment;
+pub use signer::SignerPolicy;
+pub use signer::SoftwareSigner;

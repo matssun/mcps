@@ -180,6 +180,28 @@ pub fn build_signed_request(
     inputs: &RequestSigningInputs,
     signing_key: &SigningKey,
 ) -> Result<SignedRequest, McpsError> {
+    // The in-process software signer signs infallibly; wrap it as the closure the
+    // shared core expects. The key-custody abstraction (MCPS-46) uses the same core
+    // with a delegated/non-exporting signer via [`build_signed_request_with`].
+    build_signed_request_with(id, method, params, inputs, |preimage| {
+        Ok(signing_key.sign(preimage))
+    })
+}
+
+/// The shared request-construction core, generic over HOW the canonical preimage
+/// is signed. `sign` receives the exact preimage bytes and returns the
+/// Base64URL-no-pad signature value (or a typed failure — e.g. a delegated signer
+/// that is unavailable/revoked fails closed here). This is the single seam every
+/// signing mechanism (in-process software key, KMS/HSM, delegated service) flows
+/// through, so the envelope shape and preimage rule are authored in exactly one
+/// place. `inputs.signer` / `inputs.key_id` identify the signer in the evidence.
+pub(crate) fn build_signed_request_with(
+    id: &Value,
+    method: &str,
+    params: Map<String, Value>,
+    inputs: &RequestSigningInputs,
+    sign: impl FnOnce(&[u8]) -> Result<String, McpsError>,
+) -> Result<SignedRequest, McpsError> {
     // Step 1 — fail closed on an unsupported scheme before constructing evidence.
     check_canonicalization_id(&inputs.canonicalization_id)?;
 
@@ -221,7 +243,7 @@ pub fn build_signed_request(
 
     // Step 3 — sign the canonical preimage (signature.value omitted by construction).
     let preimage = request_signing_preimage(&request)?;
-    let signature = signing_key.sign(&preimage);
+    let signature = sign(&preimage)?;
 
     // Step 4 — graft the signature value and compute the response-binding hash.
     // request_hash recomputes the SAME preimage (it excludes signature.value), so

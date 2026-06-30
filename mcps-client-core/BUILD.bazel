@@ -77,3 +77,18 @@ nt_rust_test(
         "@crates_mcps//:serde_json",
     ],
 )
+
+# MCPS-46: a request built through the ClientSigner custody seam (with the policy
+# gate) verifies server-side and the evidence names the actual signer.
+nt_rust_test(
+    name = "signer_custody_test",
+    srcs = ["tests/signer_custody_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_client_core",
+        "//mcps-core:mcps_core",
+        "@crates_mcps//:serde_json",
+    ],
+)
