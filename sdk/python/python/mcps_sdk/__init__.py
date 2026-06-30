@@ -30,6 +30,8 @@ __all__ = [
     "SignerPolicy",
     "TrustResolver",
     "VerifyResult",
+    "CorrelationStore",
+    "PendingRequest",
     "McpsTransport",
     "connect",
 ]
@@ -54,6 +56,10 @@ verify_response = _core.verify_response
 TrustResolver = _core.TrustResolver
 #: Structured verification outcome: ``.decision`` / ``.path`` / ``.reason`` / ``.server_signer``.
 VerifyResult = _core.VerifyResult
+#: In-flight correlation: binds a signed request to one acceptable returning response.
+CorrelationStore = _core.CorrelationStore
+#: One outstanding request's retained state (returned by ``take_for_response``).
+PendingRequest = _core.PendingRequest
 
 # Imported lazily-friendly: these modules reference `mcp`, a declared dependency.
 from .transport import McpsTransport  # noqa: E402
