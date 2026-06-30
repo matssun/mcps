@@ -69,6 +69,7 @@ pub use time::parse_rfc3339_utc;
 pub use time::unix_to_rfc3339_utc;
 pub use wire::json_rpc_error_object;
 pub use wire::MCPS_JSON_RPC_ERROR_CODE;
+pub use signing::preimage_exclusion_paths;
 pub use signing::request_hash;
 pub use signing::request_signing_preimage;
 pub use signing::response_signing_preimage;

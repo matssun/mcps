@@ -104,6 +104,49 @@ pub fn signing_preimage(
     canonicalize_json_value(&cloned)
 }
 
+/// The canonical preimage EXCLUSION PREDICATE (ADR-MCPS-038 / decision C.1),
+/// made explicit as an enumerable set of JSON paths. The signed preimage is the
+/// complete JSON-RPC object MINUS exactly these paths — **nothing recursive,
+/// nothing by key-name alone**:
+///
+/// 1. the located envelope's `signature.value`
+///    (req `params._meta["se.syncom/mcps.request"].signature.value`;
+///     resp `result._meta["se.syncom/mcps.response"].signature.value`); and
+/// 2. the three W3C Trace Context keys ([`OBSERVABILITY_META_KEYS`]) at
+///    **container-level** `_meta` only
+///    (req `params._meta.{traceparent,tracestate,baggage}`;
+///     resp `result._meta.{...}`).
+///
+/// A `traceparent` under `params.arguments._meta` or `result.content[*]._meta`
+/// is application payload and stays SIGNED — recursive name-based exclusion would
+/// let an attacker relocate security bytes under a reserved observability name to
+/// strip them from integrity coverage (decision C.1). This is the SAME predicate
+/// draft-01 and draft-02 both obey ([`signing_preimage`] is version-agnostic);
+/// exposing it as data lets an independent verifier recompute the preimage by
+/// deleting exactly these paths — the C.1 byte-equality oracle.
+///
+/// Each path is a sequence of object-key segments from the document root. Array
+/// indices are intentionally absent: the predicate never excludes anything inside
+/// an array (`result.content[*]`), by design.
+pub fn preimage_exclusion_paths(location: EnvelopeLocation) -> Vec<Vec<String>> {
+    let container = location.container_key().to_string();
+    let meta_key = location.meta_key().to_string();
+    let mut paths = Vec::with_capacity(1 + OBSERVABILITY_META_KEYS.len());
+    // (1) the located envelope's signature.value.
+    paths.push(vec![
+        container.clone(),
+        "_meta".to_string(),
+        meta_key,
+        "signature".to_string(),
+        "value".to_string(),
+    ]);
+    // (2) container-level W3C trace keys only.
+    for key in OBSERVABILITY_META_KEYS {
+        paths.push(vec![container.clone(), "_meta".to_string(), key.to_string()]);
+    }
+    paths
+}
+
 /// `request_hash` (MCPS_SPEC §3.6): SHA-256 of the REQUEST signing preimage,
 /// formatted `sha256:<b64url-no-pad>`.
 pub fn request_hash(request_object: &Value) -> Result<String, McpsError> {
@@ -176,9 +219,11 @@ fn strip_observability_meta(object: &mut Value, location: EnvelopeLocation) {
 
 #[cfg(test)]
 mod tests {
+    use super::preimage_exclusion_paths;
     use super::request_hash;
     use super::request_signing_preimage;
     use super::response_signing_preimage;
+    use super::EnvelopeLocation;
     use crate::canonical::canonicalize_json_value;
     use crate::error::McpsError;
     use serde_json::json;
@@ -406,5 +451,171 @@ mod tests {
             request_signing_preimage(&base).expect("preimage"),
             request_signing_preimage(&altered).expect("preimage"),
         );
+    }
+
+    // ---- ADR-MCPS-038 / decision C.1 — explicit exclusion predicate ----------
+
+    /// Delete an object-key path (the predicate's representation) from a value;
+    /// independent of the production builder's `strip_*` functions.
+    fn remove_path(value: &mut Value, path: &[String]) {
+        let Some((last, parents)) = path.split_last() else {
+            return;
+        };
+        let mut cur = value;
+        for seg in parents {
+            match cur.get_mut(seg) {
+                Some(next) => cur = next,
+                None => return,
+            }
+        }
+        if let Some(obj) = cur.as_object_mut() {
+            obj.remove(last);
+        }
+    }
+
+    /// A draft-02 request object with BOTH protected identifiers, a container-level
+    /// trace key (excluded) AND a nested `arguments._meta` trace key (signed).
+    fn draft02_request_object() -> Value {
+        let mut obj = request_object();
+        let env = obj["params"]["_meta"]["se.syncom/mcps.request"]
+            .as_object_mut()
+            .unwrap();
+        env.insert("version".into(), json!("draft-02"));
+        env.insert("canonicalization_id".into(), json!("mcps-jcs-int53-json-v1"));
+        // container-level trace key — EXCLUDED by the predicate.
+        obj["params"]["_meta"]
+            .as_object_mut()
+            .unwrap()
+            .insert("traceparent".into(), json!("00-aaaa-1"));
+        // nested trace key — application payload, SIGNED.
+        obj["params"]["arguments"]
+            .as_object_mut()
+            .unwrap()
+            .insert("_meta".into(), json!({ "traceparent": "00-bbbb-2" }));
+        obj
+    }
+
+    #[test]
+    fn draft02_preimage_equals_independent_predicate_deletion() {
+        // C.1 byte-equality oracle: the production preimage must equal the object
+        // with EXACTLY the predicate paths deleted by independent code.
+        let obj = draft02_request_object();
+        let actual = request_signing_preimage(&obj).expect("preimage");
+
+        let mut expected_obj = obj.clone();
+        for path in preimage_exclusion_paths(EnvelopeLocation::Request) {
+            remove_path(&mut expected_obj, &path);
+        }
+        let expected = canonicalize_json_value(&expected_obj).expect("canon");
+        assert_eq!(actual, expected, "preimage excludes exactly the predicate");
+    }
+
+    #[test]
+    fn draft02_predicate_excludes_container_trace_but_keeps_protected_and_nested() {
+        let preimage = request_signing_preimage(&draft02_request_object()).expect("preimage");
+        let text = String::from_utf8(preimage).expect("utf8");
+        // signature.value excluded.
+        assert!(!text.contains("c2lnbmF0dXJl"));
+        // container-level traceparent excluded.
+        assert!(!text.contains("00-aaaa-1"));
+        // nested arguments._meta.traceparent RETAINED (signed).
+        assert!(text.contains("00-bbbb-2"));
+        // protected identifiers RETAINED.
+        assert!(text.contains("draft-02"));
+        assert!(text.contains("mcps-jcs-int53-json-v1"));
+        assert!(text.contains("\"alg\":\"Ed25519\""));
+        assert!(text.contains("\"key_id\":\"key-1\""));
+    }
+
+    #[test]
+    fn draft02_preimage_is_byte_identical_across_key_order_whitespace_escapes() {
+        // Determinism: three raw encodings that differ only in member order,
+        // whitespace, and escape spelling (e == 'e') must canonicalize to a
+        // byte-identical preimage.
+        let pretty = r#"{
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "tools/call",
+            "params": {
+                "name": "echo",
+                "arguments": { "text": "hello" },
+                "_meta": {
+                    "se.syncom/mcps.request": {
+                        "version": "draft-02",
+                        "canonicalization_id": "mcps-jcs-int53-json-v1",
+                        "signer": "did:example:host",
+                        "on_behalf_of": "user:alice",
+                        "audience": "did:example:server",
+                        "authorization_hash": "sha256:AAAA",
+                        "nonce": "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA",
+                        "issued_at": "2026-05-28T20:00:00Z",
+                        "expires_at": "2026-05-28T20:05:00Z",
+                        "signature": { "alg": "Ed25519", "key_id": "key-1", "value": "c2lnbmF0dXJl" }
+                    }
+                }
+            }
+        }"#;
+        // Reordered members, collapsed whitespace, and an escaped 'e' in "echo".
+        let reordered = r#"{"method":"tools/call","params":{"_meta":{"se.syncom/mcps.request":{"signature":{"value":"c2lnbmF0dXJl","key_id":"key-1","alg":"Ed25519"},"expires_at":"2026-05-28T20:05:00Z","issued_at":"2026-05-28T20:00:00Z","nonce":"Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA","authorization_hash":"sha256:AAAA","audience":"did:example:server","on_behalf_of":"user:alice","signer":"did:example:host","canonicalization_id":"mcps-jcs-int53-json-v1","version":"draft-02"}},"arguments":{"text":"hello"},"name":"echo"},"id":"req-1","jsonrpc":"2.0"}"#;
+
+        let a: Value = serde_json::from_str(pretty).expect("parse pretty");
+        let b: Value = serde_json::from_str(reordered).expect("parse reordered");
+        assert_eq!(
+            request_signing_preimage(&a).expect("preimage a"),
+            request_signing_preimage(&b).expect("preimage b"),
+            "key order / whitespace / escape spelling must not change the preimage"
+        );
+    }
+
+    /// Mutating any protected draft-02 field — version, canonicalization_id, alg,
+    /// key_id — changes the preimage (none are excluded), so the signature breaks.
+    #[test]
+    fn draft02_mutating_protected_fields_changes_the_preimage() {
+        let baseline = request_signing_preimage(&draft02_request_object()).expect("preimage");
+        for (field, value) in [
+            ("version", json!("draft-99")),
+            ("canonicalization_id", json!("mcps-jcs-other-v1")),
+        ] {
+            let mut m = draft02_request_object();
+            m["params"]["_meta"]["se.syncom/mcps.request"][field] = value;
+            assert_ne!(
+                baseline,
+                request_signing_preimage(&m).expect("preimage"),
+                "mutating protected field {field} must change the preimage"
+            );
+        }
+        for (field, value) in [("alg", json!("RS256")), ("key_id", json!("key-2"))] {
+            let mut m = draft02_request_object();
+            m["params"]["_meta"]["se.syncom/mcps.request"]["signature"][field] = value;
+            assert_ne!(
+                baseline,
+                request_signing_preimage(&m).expect("preimage"),
+                "mutating signature.{field} must change the preimage"
+            );
+        }
+    }
+
+    #[test]
+    fn exclusion_predicate_enumerates_exactly_the_documented_paths() {
+        let req = preimage_exclusion_paths(EnvelopeLocation::Request);
+        assert_eq!(
+            req,
+            vec![
+                vec![
+                    "params".to_string(),
+                    "_meta".to_string(),
+                    "se.syncom/mcps.request".to_string(),
+                    "signature".to_string(),
+                    "value".to_string()
+                ],
+                vec!["params".to_string(), "_meta".to_string(), "traceparent".to_string()],
+                vec!["params".to_string(), "_meta".to_string(), "tracestate".to_string()],
+                vec!["params".to_string(), "_meta".to_string(), "baggage".to_string()],
+            ]
+        );
+        let resp = preimage_exclusion_paths(EnvelopeLocation::Response);
+        assert_eq!(resp[0][0], "result");
+        assert_eq!(resp[0][2], "se.syncom/mcps.response");
+        assert_eq!(resp.len(), 4);
     }
 }
