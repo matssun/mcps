@@ -34,3 +34,19 @@ nt_rust_test(
         "@crates_mcps//:serde_json",
     ],
 )
+
+# MCPS-51: four-hop end-to-end topology (ordinary client -> proxy -> remote MCP-S
+# -> ordinary server) running the ADR-044 §10 conformance suite over real wiring.
+nt_rust_test(
+    name = "e2e_topology_test",
+    srcs = ["tests/e2e_topology_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_client_proxy",
+        "//mcps-client-core:mcps_client_core",
+        "//mcps-core:mcps_core",
+        "@crates_mcps//:serde_json",
+    ],
+)
