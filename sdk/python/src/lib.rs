@@ -26,8 +26,9 @@ use pyo3::types::PyBytes;
 use mcps_client_core::{
     audit_for_decision, build_signed_request, build_signed_request_with_signer,
     classify_response_result, decide, verify_signed_response, AbsenceReason, ClientOutcome,
-    ClientPath, ClientSigner, CustodyClass, DevFileSigner, EnforcementDecision, EnforcementMode,
-    Environment, RequestSigningInputs, ResponseExpectation, SignerPolicy, SoftwareSigner,
+    ClientPath, ClientSigner, CorrelationError, CorrelationStore, CustodyClass, DevFileSigner,
+    EnforcementDecision, EnforcementMode, Environment, PendingRequest, RequestSigningInputs,
+    ResponseExpectation, SignerPolicy, SoftwareSigner,
 };
 use mcps_core::{AuthorizationBinding, InMemoryTrustResolver, McpsError, SigningKey, VerificationKey};
 use serde_json::{Map, Value};
@@ -88,6 +89,16 @@ fn absence_str(reason: AbsenceReason) -> &'static str {
         AbsenceReason::PlainUnsigned => "plain-unsigned",
         AbsenceReason::ExplicitUnsupportedHint => "explicit-unsupported-hint",
     }
+}
+
+/// Map a correlation failure to a Python exception carrying its frozen wire code
+/// (no parallel taxonomy: dup/nonce → replay, uncorrelatable → response-hash
+/// mismatch, expired → expired request).
+fn corr_err(e: CorrelationError) -> PyErr {
+    PyValueError::new_err(format!(
+        "mcps-client-core correlation: {}",
+        e.to_mcps_error().wire_code()
+    ))
 }
 
 // --- protocol constants ----------------------------------------------------
@@ -499,6 +510,141 @@ fn verify_response(
     })
 }
 
+// --- in-flight correlation -------------------------------------------------
+
+/// One outstanding request's retained state, returned by
+/// [`CorrelationStore::take_for_response`].
+#[pyclass(name = "PendingRequest", frozen)]
+struct PyPendingEntry {
+    #[pyo3(get)]
+    correlation_id: String,
+    #[pyo3(get)]
+    request_hash: String,
+    #[pyo3(get)]
+    nonce: String,
+    #[pyo3(get)]
+    issued_at_unix: i64,
+    #[pyo3(get)]
+    deadline_unix: i64,
+    #[pyo3(get)]
+    route_id: String,
+    #[pyo3(get)]
+    audience: String,
+    #[pyo3(get)]
+    expected_server_signers: Vec<String>,
+    #[pyo3(get)]
+    version: String,
+    #[pyo3(get)]
+    canonicalization_id: String,
+    #[pyo3(get)]
+    authz_digest: String,
+}
+
+impl PyPendingEntry {
+    fn from_pending(p: PendingRequest) -> Self {
+        PyPendingEntry {
+            correlation_id: p.correlation_id,
+            request_hash: p.request_hash,
+            nonce: p.nonce,
+            issued_at_unix: p.issued_at_unix,
+            deadline_unix: p.deadline_unix,
+            route_id: p.route_id,
+            audience: p.audience,
+            expected_server_signers: p.expected_server_signers,
+            version: p.version,
+            canonicalization_id: p.canonicalization_id,
+            authz_digest: p.authz_digest,
+        }
+    }
+}
+
+/// Per-outstanding-request correlation store: binds an outgoing signed request to
+/// exactly one acceptable returning response, with nonce-reuse prevention and an
+/// expiry sweep. The clock is the caller's: every method takes `now_unix`.
+/// Failures (duplicate id, nonce reuse, late/uncorrelatable, expired) raise
+/// `ValueError` carrying the frozen `mcps.*` wire code.
+#[pyclass(name = "CorrelationStore")]
+struct PyCorrelationStore {
+    inner: CorrelationStore,
+}
+
+#[pymethods]
+impl PyCorrelationStore {
+    #[new]
+    fn new() -> Self {
+        PyCorrelationStore {
+            inner: CorrelationStore::new(),
+        }
+    }
+
+    /// The number of currently-outstanding requests.
+    #[getter]
+    fn outstanding(&self) -> usize {
+        self.inner.outstanding()
+    }
+
+    /// Register an outstanding request at `now_unix`. Fails closed on a duplicate
+    /// correlation id or a nonce still within a prior use's window.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        *, correlation_id, request_hash, nonce, deadline_unix, now_unix,
+        issued_at_unix=0, route_id="", audience="", expected_server_signers=Vec::new(),
+        version=None, canonicalization_id=None, authz_digest="",
+    ))]
+    fn register(
+        &mut self,
+        correlation_id: &str,
+        request_hash: &str,
+        nonce: &str,
+        deadline_unix: i64,
+        now_unix: i64,
+        issued_at_unix: i64,
+        route_id: &str,
+        audience: &str,
+        expected_server_signers: Vec<String>,
+        version: Option<&str>,
+        canonicalization_id: Option<&str>,
+        authz_digest: &str,
+    ) -> PyResult<()> {
+        let pending = PendingRequest {
+            correlation_id: correlation_id.to_string(),
+            request_hash: request_hash.to_string(),
+            nonce: nonce.to_string(),
+            issued_at_unix,
+            deadline_unix,
+            route_id: route_id.to_string(),
+            audience: audience.to_string(),
+            expected_server_signers,
+            version: version.unwrap_or(mcps_core::VERSION_DRAFT_02).to_string(),
+            canonicalization_id: canonicalization_id
+                .unwrap_or(mcps_core::CANONICALIZATION_ID_INT53_V1)
+                .to_string(),
+            authz_digest: authz_digest.to_string(),
+        };
+        self.inner.register(pending, now_unix).map_err(corr_err)
+    }
+
+    /// Correlate an incoming response by `correlation_id` at `now_unix`, removing and
+    /// returning the pending entry (cleanup-on-completion). A late/uncorrelatable or
+    /// past-deadline response fails closed.
+    fn take_for_response(&mut self, correlation_id: &str, now_unix: i64) -> PyResult<PyPendingEntry> {
+        self.inner
+            .take_for_response(correlation_id, now_unix)
+            .map(PyPendingEntry::from_pending)
+            .map_err(corr_err)
+    }
+
+    /// Cancel an outstanding request; returns whether an entry was present.
+    fn cancel(&mut self, correlation_id: &str) -> bool {
+        self.inner.cancel(correlation_id).is_some()
+    }
+
+    /// Periodic expiry sweep at `now_unix`; returns how many pending entries were dropped.
+    fn sweep_expired(&mut self, now_unix: i64) -> usize {
+        self.inner.sweep_expired(now_unix)
+    }
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
@@ -511,5 +657,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySignerPolicy>()?;
     m.add_class::<PyTrustResolver>()?;
     m.add_class::<PyVerifyResult>()?;
+    m.add_class::<PyCorrelationStore>()?;
+    m.add_class::<PyPendingEntry>()?;
     Ok(())
 }
