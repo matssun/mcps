@@ -27,13 +27,26 @@
 //!   the injected `TrustResolver`, `request_hash`/`canonicalization_id` binding,
 //!   unsigned + unexpected-signer fail-closed.
 //!
-//! The enforcement engine, authz-binding hook, signer custody, correlation store,
-//! discovery, and audit/error mapping land in the following sprint slices
-//! (#189–#200) on top of this seam.
+//! - MCPS-42 (#189): the enforcement-mode engine ([`decide`] /
+//!   [`EnforcementMode`] / [`classify_response_result`]) — the two normative modes
+//!   plus the bright-line fallback taxonomy (absence may fall back only under
+//!   `allow_legacy_explicit` + an allowlisted route; bad/downgrade-shaped evidence
+//!   always fails closed).
+//!
+//! The authz-binding hook, signer custody, correlation store, discovery, and
+//! audit/error mapping land in the following sprint slices (#190–#200) on top of
+//! this seam.
 
+pub mod enforcement;
 pub mod request;
 pub mod response;
 
+pub use enforcement::classify_response_result;
+pub use enforcement::decide;
+pub use enforcement::AbsenceReason;
+pub use enforcement::EnforcementDecision;
+pub use enforcement::EnforcementMode;
+pub use enforcement::EvidenceOutcome;
 pub use request::build_signed_request;
 pub use request::build_signed_tool_call;
 pub use request::RequestSigningInputs;
