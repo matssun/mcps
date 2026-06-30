@@ -2,9 +2,10 @@
 //!
 //! This is the in-tree demo target for MCPS-EPIC-P6.5: an ORDINARY MCP server
 //! that the MCP-S sidecar (`mcps-proxy`) wraps unchanged. It speaks plain MCP
-//! JSON-RPC (`initialize`, `tools/list`, `tools/call`) and exposes exactly one
-//! tool, `list_files`, confined to a configured demo-root directory. It knows
-//! nothing about signing, envelopes, or verified context.
+//! JSON-RPC (`initialize`, `tools/list`, `tools/call`) and exposes four file
+//! tools — `list_files`, `read_file`, `stat` (scope `protected`) and
+//! `write_file` (scope `admin`) — confined to a configured demo-root directory.
+//! It knows nothing about signing, envelopes, or verified context.
 //!
 //! Crate boundary (ADR-MCPS-001): self-contained — depends only on the pure
 //! serde subset plus thiserror, no other in-repo crate, no async runtime. Unlike
@@ -16,4 +17,8 @@ pub mod stdio;
 
 pub use error::FileServerError;
 pub use server::FileServer;
+pub use server::TOOL_LIST_FILES;
+pub use server::TOOL_READ_FILE;
+pub use server::TOOL_STAT;
+pub use server::TOOL_WRITE_FILE;
 pub use stdio::serve_stdio;

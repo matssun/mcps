@@ -77,7 +77,7 @@ fn initialize_returns_well_formed_result() {
 }
 
 #[test]
-fn tools_list_includes_list_files_with_path_schema() {
+fn tools_list_advertises_four_scoped_tools() {
     let server = server();
     let response = handle(
         &server,
@@ -88,15 +88,36 @@ fn tools_list_includes_list_files_with_path_schema() {
     let tools = response["result"]["tools"]
         .as_array()
         .expect("tools array");
-    assert_eq!(tools.len(), 1, "exactly one tool");
-    let tool = &tools[0];
-    assert_eq!(tool["name"], "list_files");
-    assert!(tool["description"].is_string());
-    let schema = &tool["inputSchema"];
-    assert_eq!(schema["type"], "object");
-    assert_eq!(schema["properties"]["path"]["type"], "string");
-    let required = schema["required"].as_array().expect("required array");
-    assert!(required.iter().any(|r| r == "path"));
+
+    // Map name -> intended scope, so the assertions don't depend on order.
+    let scope_of = |name: &str| -> String {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("tool '{name}' present"))
+            ["annotations"]["net.mcps.intendedScope"]
+            .as_str()
+            .expect("scope annotation")
+            .to_string()
+    };
+
+    assert_eq!(tools.len(), 4, "list_files, read_file, stat, write_file");
+    assert_eq!(scope_of("list_files"), "protected");
+    assert_eq!(scope_of("read_file"), "protected");
+    assert_eq!(scope_of("stat"), "protected");
+    assert_eq!(scope_of("write_file"), "admin");
+
+    // list_files keeps its single `path` arg; write_file also requires `content`.
+    let list_schema = &tools.iter().find(|t| t["name"] == "list_files").unwrap()["inputSchema"];
+    assert_eq!(list_schema["properties"]["path"]["type"], "string");
+    let write_required = tools
+        .iter()
+        .find(|t| t["name"] == "write_file")
+        .unwrap()["inputSchema"]["required"]
+        .as_array()
+        .expect("write required array");
+    assert!(write_required.iter().any(|r| r == "path"));
+    assert!(write_required.iter().any(|r| r == "content"));
 }
 
 #[test]
@@ -255,4 +276,198 @@ fn malformed_json_is_a_parse_error_with_null_id() {
     let response: Value = serde_json::from_slice(&response_bytes).expect("parse response");
     assert_eq!(response["error"]["code"], -32700);
     assert_eq!(response["id"], Value::Null);
+}
+
+// --- Phase 1: read_file / stat / write_file ---------------------------------
+
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
+/// A fresh, empty, WRITABLE root for mutation tests. Uses the per-test-binary
+/// temp dir Cargo provides (`CARGO_TARGET_TMPDIR`), Bazel's `TEST_TMPDIR`, or the
+/// system temp dir — never the committed read-only fixture.
+fn writable_root() -> PathBuf {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let base = std::env::var("CARGO_TARGET_TMPDIR")
+        .ok()
+        .or_else(|| std::env::var("TEST_TMPDIR").ok())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let unique = format!(
+        "fileserver_wr_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
+    let dir = base.join(unique);
+    std::fs::create_dir_all(&dir).expect("create writable root");
+    dir
+}
+
+/// `tools/call` a tool with `arguments` and return the parsed response.
+fn call(server: &FileServer, id: i64, name: &str, arguments: Value) -> Value {
+    handle(
+        server,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        }),
+    )
+}
+
+#[test]
+fn read_file_returns_fixture_text() {
+    let server = server();
+    let expected = std::fs::read_to_string(demo_root().join("readme.txt")).expect("fixture readable");
+
+    let response = call(&server, 20, "read_file", json!({ "path": "readme.txt" }));
+
+    assert!(response.get("error").is_none());
+    let result = &response["result"];
+    assert_eq!(result["isError"], false);
+    assert_eq!(result["structuredContent"]["content"], expected);
+    assert_eq!(result["structuredContent"]["size"], expected.len());
+    // The human content carries the same text.
+    assert_eq!(result["content"][0]["text"], expected);
+}
+
+#[test]
+fn read_file_on_a_directory_is_a_tool_error() {
+    let server = server();
+    let response = call(&server, 21, "read_file", json!({ "path": "reports" }));
+    assert_eq!(response["result"]["isError"], true);
+    assert!(response["result"].get("structuredContent").is_none());
+}
+
+#[test]
+fn read_file_refuses_dotdot_escape() {
+    let server = server();
+    let response = call(&server, 22, "read_file", json!({ "path": "../Cargo.toml" }));
+    assert_eq!(response["result"]["isError"], true);
+}
+
+#[test]
+fn read_file_on_non_utf8_bytes_is_a_tool_error() {
+    let root = writable_root();
+    std::fs::write(root.join("blob.bin"), [0xff, 0xfe, 0x00, 0x01]).expect("write blob");
+    let server = FileServer::new(&root);
+
+    let response = call(&server, 23, "read_file", json!({ "path": "blob.bin" }));
+
+    let result = &response["result"];
+    assert_eq!(result["isError"], true);
+    let text = result["content"][0]["text"].as_str().expect("error text");
+    assert!(text.to_lowercase().contains("utf-8"), "got: {text}");
+}
+
+#[test]
+fn stat_reports_file_type_and_size() {
+    let server = server();
+    let size = std::fs::metadata(demo_root().join("readme.txt")).unwrap().len();
+
+    let response = call(&server, 24, "stat", json!({ "path": "readme.txt" }));
+
+    let sc = &response["result"]["structuredContent"];
+    assert_eq!(sc["type"], "file");
+    assert_eq!(sc["size"], size);
+}
+
+#[test]
+fn stat_reports_directory() {
+    let server = server();
+    let response = call(&server, 25, "stat", json!({ "path": "reports" }));
+    assert_eq!(response["result"]["structuredContent"]["type"], "directory");
+}
+
+#[test]
+fn write_file_creates_then_read_back_round_trips() {
+    let root = writable_root();
+    let server = FileServer::new(&root);
+
+    let write = call(&server, 26, "write_file", json!({ "path": "note.txt", "content": "hello" }));
+    assert!(write.get("error").is_none());
+    assert_eq!(write["result"]["isError"], false);
+    assert_eq!(write["result"]["structuredContent"]["bytes_written"], 5);
+
+    // It actually hit disk, inside the root.
+    assert_eq!(std::fs::read_to_string(root.join("note.txt")).unwrap(), "hello");
+
+    // And read_file sees it.
+    let read = call(&server, 27, "read_file", json!({ "path": "note.txt" }));
+    assert_eq!(read["result"]["structuredContent"]["content"], "hello");
+}
+
+#[test]
+fn write_file_overwrites_existing_content() {
+    let root = writable_root();
+    let server = FileServer::new(&root);
+
+    call(&server, 28, "write_file", json!({ "path": "note.txt", "content": "first" }));
+    call(&server, 29, "write_file", json!({ "path": "note.txt", "content": "second" }));
+
+    assert_eq!(std::fs::read_to_string(root.join("note.txt")).unwrap(), "second");
+}
+
+#[test]
+fn write_file_refuses_dotdot_escape_and_writes_nothing_outside() {
+    let root = writable_root();
+    let server = FileServer::new(&root);
+
+    let response = call(&server, 30, "write_file", json!({ "path": "../escaped.txt", "content": "x" }));
+
+    assert_eq!(response["result"]["isError"], true);
+    // Nothing was written to the parent of the root.
+    assert!(!root.join("../escaped.txt").exists(), "escape must not create a file");
+}
+
+#[test]
+fn write_file_into_missing_subdir_is_a_tool_error() {
+    let root = writable_root();
+    let server = FileServer::new(&root);
+
+    // The parent dir `sub/` does not exist; the demo does not auto-create dirs.
+    let response = call(&server, 31, "write_file", json!({ "path": "sub/note.txt", "content": "x" }));
+    assert_eq!(response["result"]["isError"], true);
+}
+
+#[test]
+fn write_file_over_size_limit_is_refused_before_disk() {
+    let root = writable_root();
+    let server = FileServer::new(&root);
+
+    let too_big = "a".repeat((1 << 20) + 1); // one byte over the 1 MiB ceiling
+    let response = call(&server, 32, "write_file", json!({ "path": "big.txt", "content": too_big }));
+
+    assert_eq!(response["result"]["isError"], true);
+    assert!(!root.join("big.txt").exists(), "over-size write must not touch disk");
+}
+
+#[test]
+fn write_file_missing_content_arg_is_a_jsonrpc_error() {
+    let server = server();
+    let response = call(&server, 33, "write_file", json!({ "path": "note.txt" }));
+    // A missing required argument is a protocol-level fault, not a tool error.
+    assert!(response.get("error").is_some(), "missing arg -> JSON-RPC error");
+}
+
+#[test]
+fn received_log_records_dispatched_tools_only() {
+    let root = writable_root();
+    let log_path = root.join("received.log");
+    let server = FileServer::new(&root)
+        .with_received_log(&log_path)
+        .expect("attach received log");
+
+    // A recognized tool that runs -> recorded.
+    call(&server, 40, "stat", json!({ "path": "." }));
+    // An unknown tool -> JSON-RPC error, never dispatched -> NOT recorded.
+    call(&server, 41, "no_such_tool", json!({}));
+
+    let log = std::fs::read_to_string(&log_path).expect("read log");
+    let lines: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 1, "exactly one dispatched call recorded, got: {log:?}");
+    let entry: Value = serde_json::from_str(lines[0]).expect("log line is json");
+    assert_eq!(entry["id"], 40);
+    assert_eq!(entry["tool"], "stat");
 }

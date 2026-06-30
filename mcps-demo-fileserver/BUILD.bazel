@@ -4,7 +4,8 @@ package(default_visibility = ["//visibility:public"])
 
 # MCPS-045 (MCPS-EPIC-P6.5): the minimal, MCP-S-UNAWARE demo MCP server the
 # sidecar protects. Plain MCP JSON-RPC over stdio (initialize / tools/list /
-# tools/call) with one tool, `list_files`, confined to a demo root. Self-
+# tools/call) with four file tools — list_files/read_file/stat (scope
+# `protected`) and write_file (scope `admin`) — confined to a demo root. Self-
 # contained (ADR-MCPS-001): depends only on the pure serde subset + thiserror
 # from the isolated crates_mcps hub — no other in-repo crate, no async runtime.
 # MAY use std::fs / std::io (it is a file server); mcps-core stays pure.
@@ -25,8 +26,9 @@ nt_rust_library(
     ],
 )
 
-# The stdio entrypoint: `mcps-demo-fileserver --demo-root <DIR>`. Later wrapped
-# by mcps-proxy as the inner subprocess (Child Issue 3).
+# The stdio entrypoint: `mcps-demo-fileserver --demo-root <DIR>
+# [--received-log <PATH>]`. Wrapped by mcps-proxy as the inner subprocess; the
+# optional received-log records each dispatched tools/call for deny tests.
 nt_rust_binary(
     name = "mcps_demo_fileserver_bin",
     srcs = ["src/main.rs"],
@@ -44,10 +46,11 @@ filegroup(
     srcs = glob(["demo_root/**"]),
 )
 
-# Black-box server tests: initialize / tools/list / tools/call(list_files),
-# positive listing, and the demo-root escape refusals. The demo_root fixture is
-# delivered via runfiles; the test resolves DEMO_ROOT_README ($(rlocationpath))
-# against TEST_SRCDIR and lists its parent (no runfiles-crate dependency).
+# Black-box server tests: initialize / tools/list / the four tools' happy paths,
+# the demo-root escape refusals (read + write), write round-trips, size/UTF-8
+# limits, and the received-log receipt. The read-only demo_root fixture is
+# delivered via runfiles (DEMO_ROOT_README/$(rlocationpath) resolved against
+# TEST_SRCDIR); write tests use Bazel's TEST_TMPDIR, never the fixture.
 nt_rust_test(
     name = "server_test",
     srcs = ["tests/server_test.rs"],

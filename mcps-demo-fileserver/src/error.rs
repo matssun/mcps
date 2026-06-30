@@ -39,6 +39,18 @@ pub enum FileServerError {
     /// The resolved directory could not be read (missing, not a directory, I/O).
     #[error("cannot read directory '{0}': {1}")]
     ReadDir(String, String),
+
+    /// A file read/write/stat failed (missing, is-a-directory, permissions, I/O).
+    #[error("cannot access '{0}': {1}")]
+    Io(String, String),
+
+    /// `read_file` target was not valid UTF-8 text (the demo serves text only).
+    #[error("file '{0}' is not valid UTF-8 text")]
+    NotUtf8(String),
+
+    /// The file exceeds the demo's per-file byte ceiling. Refused.
+    #[error("file '{0}' exceeds the {1}-byte demo limit")]
+    TooLarge(String, u64),
 }
 
 impl FileServerError {
@@ -55,6 +67,9 @@ impl FileServerError {
             FileServerError::InvalidParams(_) => -32602,
             FileServerError::PathEscapesRoot(_) => -32602,
             FileServerError::ReadDir(_, _) => -32603,
+            FileServerError::Io(_, _) => -32603,
+            FileServerError::NotUtf8(_) => -32602,
+            FileServerError::TooLarge(_, _) => -32602,
         }
     }
 }
