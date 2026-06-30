@@ -48,6 +48,8 @@ maintainable as the project evolves.
 | [ADR-MCPS-034](adr-mcps-034.md) | Method-Transparency Is CI-Enforced — Behavioral Equivalence Test + Static Drift Guard (Proposed) |
 | [ADR-MCPS-035](adr-mcps-035.md) | MCP-S Audit-Evidence Vocabulary Is Derived From the Frozen Error Taxonomy (Proposed) |
 | [ADR-MCPS-036](adr-mcps-036.md) | Proposal-Readiness Is a Dual Gate — Mechanical CI + Owner HITL — Over One Evidence Spine (Proposed) |
+| [ADR-MCPS-043](adr-mcps-043.md) | MCP-S Discovery, Capability Advertisement, and Enforcement Policy (Proposed, v0.7) |
+| [ADR-MCPS-044](adr-mcps-044.md) | Client-Side MCP-S Integration Model (Proposed, v0.7/v0.8) |
 
 ## Provenance
 
