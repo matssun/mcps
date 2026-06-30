@@ -74,6 +74,10 @@ pub mod authz;
 pub mod correlation;
 pub mod discovery;
 pub mod enforcement;
+// MCPS-53 (#200): the dev/test-only opportunistic probe. Compiled out of a default
+// production build — an enforced boundary (it can never affect enforcement anyway).
+#[cfg(any(test, feature = "dev-probe"))]
+pub mod probe;
 pub mod request;
 pub mod response;
 pub mod signer;
@@ -117,6 +121,10 @@ pub use enforcement::AbsenceReason;
 pub use enforcement::EnforcementDecision;
 pub use enforcement::EnforcementMode;
 pub use enforcement::EvidenceOutcome;
+#[cfg(any(test, feature = "dev-probe"))]
+pub use probe::OpportunisticProbe;
+#[cfg(any(test, feature = "dev-probe"))]
+pub use probe::SupportObservation;
 pub use request::build_signed_request;
 pub use request::build_signed_tool_call;
 pub use request::RequestSigningInputs;

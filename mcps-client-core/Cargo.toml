@@ -15,6 +15,14 @@ description = "MCP-S client-side core — the shared seam (consumed by the clien
 mcps-core = { path = "../mcps-core" }
 serde_json = { workspace = true }
 
+[features]
+# MCPS-53 (#200): the non-normative opportunistic support PROBE is dev/test only.
+# It is compiled ONLY under cfg(test) or this explicit, non-default feature, so a
+# default (production) build does not link it — an enforced boundary, not just a
+# doc note. The probe can never affect a trust decision regardless.
+default = []
+dev-probe = []
+
 [lib]
 name = "mcps_client_core"
 path = "src/lib.rs"
