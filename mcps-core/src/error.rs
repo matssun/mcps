@@ -103,6 +103,59 @@ pub enum McpsError {
     /// `trust_resolver_unavailable`.
     #[error("mcps.replay_cache_unavailable")]
     ReplayCacheUnavailable,
+
+    // ----- Draft-02 (v0.6) fail-closed codes (ADR-MCPS-040 / decision F.1) -----
+    // Granular for protocol/profile-confusion failures; low-level JSON
+    // value-domain failures stay coarse under `CanonicalizationFailed`. All nine
+    // are draft-02-scoped: draft-01 verification never emits them (ADR-MCPS-041).
+
+    /// Draft-02 envelope lacks the protected `canonicalization_id` member.
+    #[error("mcps.canonicalization_id_missing")]
+    CanonicalizationIdMissing,
+
+    /// `canonicalization_id` names no canonicalization scheme the verifier knows
+    /// (unrecognized token — an unknown-id probe).
+    #[error("mcps.canonicalization_id_unknown")]
+    CanonicalizationIdUnknown,
+
+    /// `canonicalization_id` is a recognized scheme but is not in the active
+    /// draft-02 profile allowlist (e.g. a future floats scheme presented under the
+    /// int53-only v0.6 profile) — a disallowed-future-scheme probe.
+    #[error("mcps.canonicalization_id_not_allowed")]
+    CanonicalizationIdNotAllowed,
+
+    /// The presented `canonicalization_id` does not match the value bound into the
+    /// signed evidence (request/response disagreement or a signed-wrong-scheme
+    /// presentation).
+    #[error("mcps.canonicalization_id_mismatch")]
+    CanonicalizationIdMismatch,
+
+    /// Required draft-02 `authorization_binding` object absent. MINTED for
+    /// draft-02 (ADR-MCPS-040): NOT a reuse of `authorization_hash_missing`, which
+    /// names a draft-01 field that no longer exists on the draft-02 wire.
+    #[error("mcps.authorization_binding_missing")]
+    AuthorizationBindingMissing,
+
+    /// `authorization_binding.binding_type` is not one of the base draft-02 forms
+    /// (`opaque-bytes` / `authz-system-reference`).
+    #[error("mcps.authorization_binding_type_unsupported")]
+    AuthorizationBindingTypeUnsupported,
+
+    /// `authorization_binding` is structurally invalid for its `binding_type`
+    /// (missing mandatory field, malformed digest shape, ...).
+    #[error("mcps.authorization_binding_malformed")]
+    AuthorizationBindingMalformed,
+
+    /// A structured authorization-object binding (case 3) was presented; the base
+    /// draft-02 profile forbids it without an explicit authorization-binding
+    /// profile defining artifact schema / canonicalization / hash / vectors.
+    #[error("mcps.authorization_binding_profile_required")]
+    AuthorizationBindingProfileRequired,
+
+    /// The opaque-bytes binding cannot be reduced to one unambiguous byte string
+    /// (e.g. both binding forms present, or an ambiguous artifact representation).
+    #[error("mcps.authorization_binding_ambiguous_bytes")]
+    AuthorizationBindingAmbiguousBytes,
 }
 
 impl McpsError {
@@ -131,6 +184,22 @@ impl McpsError {
             McpsError::UnknownEnvelopeField => "mcps.unknown_envelope_field",
             McpsError::TrustResolverUnavailable => "mcps.trust_resolver_unavailable",
             McpsError::ReplayCacheUnavailable => "mcps.replay_cache_unavailable",
+            // Draft-02 (v0.6) — ADR-MCPS-040 / decision F.1.
+            McpsError::CanonicalizationIdMissing => "mcps.canonicalization_id_missing",
+            McpsError::CanonicalizationIdUnknown => "mcps.canonicalization_id_unknown",
+            McpsError::CanonicalizationIdNotAllowed => "mcps.canonicalization_id_not_allowed",
+            McpsError::CanonicalizationIdMismatch => "mcps.canonicalization_id_mismatch",
+            McpsError::AuthorizationBindingMissing => "mcps.authorization_binding_missing",
+            McpsError::AuthorizationBindingTypeUnsupported => {
+                "mcps.authorization_binding_type_unsupported"
+            }
+            McpsError::AuthorizationBindingMalformed => "mcps.authorization_binding_malformed",
+            McpsError::AuthorizationBindingProfileRequired => {
+                "mcps.authorization_binding_profile_required"
+            }
+            McpsError::AuthorizationBindingAmbiguousBytes => {
+                "mcps.authorization_binding_ambiguous_bytes"
+            }
         }
     }
 }
@@ -204,6 +273,61 @@ mod tests {
         check(
             McpsError::UnknownEnvelopeField,
             "mcps.unknown_envelope_field",
+        );
+    }
+
+    #[test]
+    fn draft02_wire_strings() {
+        // ADR-MCPS-040 / decision F.1 — the nine new draft-02 fail-closed codes.
+        check(
+            McpsError::CanonicalizationIdMissing,
+            "mcps.canonicalization_id_missing",
+        );
+        check(
+            McpsError::CanonicalizationIdUnknown,
+            "mcps.canonicalization_id_unknown",
+        );
+        check(
+            McpsError::CanonicalizationIdNotAllowed,
+            "mcps.canonicalization_id_not_allowed",
+        );
+        check(
+            McpsError::CanonicalizationIdMismatch,
+            "mcps.canonicalization_id_mismatch",
+        );
+        check(
+            McpsError::AuthorizationBindingMissing,
+            "mcps.authorization_binding_missing",
+        );
+        check(
+            McpsError::AuthorizationBindingTypeUnsupported,
+            "mcps.authorization_binding_type_unsupported",
+        );
+        check(
+            McpsError::AuthorizationBindingMalformed,
+            "mcps.authorization_binding_malformed",
+        );
+        check(
+            McpsError::AuthorizationBindingProfileRequired,
+            "mcps.authorization_binding_profile_required",
+        );
+        check(
+            McpsError::AuthorizationBindingAmbiguousBytes,
+            "mcps.authorization_binding_ambiguous_bytes",
+        );
+    }
+
+    /// `authorization_binding_missing` is MINTED for draft-02 and is distinct from
+    /// the retained draft-01 `authorization_hash_missing` (ADR-MCPS-040).
+    #[test]
+    fn draft02_binding_missing_is_distinct_from_draft01_hash_missing() {
+        assert_ne!(
+            McpsError::AuthorizationBindingMissing.wire_code(),
+            McpsError::AuthorizationHashMissing.wire_code(),
+        );
+        check(
+            McpsError::AuthorizationHashMissing,
+            "mcps.authorization_hash_missing",
         );
     }
 

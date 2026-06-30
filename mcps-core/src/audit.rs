@@ -86,6 +86,16 @@ pub fn reason_label(error: &McpsError) -> &'static str {
         McpsError::UnknownEnvelopeField => "Unknown envelope field",
         McpsError::TrustResolverUnavailable => "Trust resolver unavailable",
         McpsError::ReplayCacheUnavailable => "Replay cache unavailable",
+        // Draft-02 (v0.6) — ADR-MCPS-040 / decision F.1.
+        McpsError::CanonicalizationIdMissing => "canonicalization_id missing",
+        McpsError::CanonicalizationIdUnknown => "canonicalization_id unknown",
+        McpsError::CanonicalizationIdNotAllowed => "canonicalization_id not allowed by profile",
+        McpsError::CanonicalizationIdMismatch => "canonicalization_id mismatch",
+        McpsError::AuthorizationBindingMissing => "authorization_binding missing",
+        McpsError::AuthorizationBindingTypeUnsupported => "authorization_binding type unsupported",
+        McpsError::AuthorizationBindingMalformed => "authorization_binding malformed",
+        McpsError::AuthorizationBindingProfileRequired => "authorization_binding profile required",
+        McpsError::AuthorizationBindingAmbiguousBytes => "authorization_binding ambiguous bytes",
     }
 }
 
