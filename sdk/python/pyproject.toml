@@ -21,7 +21,8 @@ dependencies = []
 # The upstream MCP Python SDK — required to actually open a session, not to load
 # the core. TODO(#199): pin to an EXACT version once the transport seam is stable.
 mcp = ["mcp>=1.16"]
-dev = ["pytest>=8", "maturin>=1.5,<2.0"]
+# dev pulls in `mcp` (and its `anyio`) so the transport-adapter tests run.
+dev = ["pytest>=8", "maturin>=1.5,<2.0", "mcp>=1.16"]
 
 [tool.maturin]
 # Mixed Rust/Python layout: Python sources under python/, native ext built from

@@ -3,11 +3,18 @@
 Runtime-evidence security for the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk):
 signed requests and verified responses, added without changing application code.
 
-> **Status: scaffold (issue #199, ADR-MCPS-044).** The structure, the build
-> wiring, and the security pipeline contract are in place. The native bindings
-> and the transport bodies are stubbed (`NotImplementedError` / `TODO(#199)`).
-> The one thing that works today is the PyO3 link to the audited core
-> (`test_core_link`).
+> **Status (issue #199, ADR-MCPS-044).** The full client obligation is bound and
+> tested over the audited `mcps-client-core` via PyO3: request signing
+> (`sign_request`), custody/signer policy (`Signer` / `SignerPolicy`), response
+> verification (`verify_response` / `TrustResolver`), in-flight correlation
+> (`CorrelationStore`), and the **transport adapter** (`McpsTransport` / `connect`)
+> that signs/verifies at the byte boundary so `mcp.ClientSession` speaks plain MCP.
+> 45 tests pass, all parity against independent `mcps-client-core` oracle vectors.
+> **Remaining:** a live cross-process end-to-end against the Rust MCP-S server
+> (`connect_stdio`'s real-subprocess path), streamable-HTTP, signed/verified
+> server-initiated messages, and pinning upstream `mcp`.
+>
+> Transport tests need `mcp` (Python ≥ 3.10): `uv venv --python 3.12 .venv312`.
 
 ## Why this exists, and why it's an *adapter*
 

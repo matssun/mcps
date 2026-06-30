@@ -115,6 +115,13 @@ fn canonicalization_id() -> &'static str {
     mcps_core::CANONICALIZATION_ID_INT53_V1
 }
 
+/// The `params._meta` / `result._meta` key under which the MCP-S response envelope
+/// lives — the adapter strips it before handing a plain response up to the app.
+#[pyfunction]
+fn response_meta_key() -> &'static str {
+    mcps_core::RESPONSE_META_KEY
+}
+
 // --- signed request --------------------------------------------------------
 
 /// A signed draft-02 request crossing the binding: the exact wire bytes plus the
@@ -649,6 +656,7 @@ impl PyCorrelationStore {
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_function(wrap_pyfunction!(canonicalization_id, m)?)?;
+    m.add_function(wrap_pyfunction!(response_meta_key, m)?)?;
     m.add_function(wrap_pyfunction!(sign_request, m)?)?;
     m.add_function(wrap_pyfunction!(sign_request_with_signer, m)?)?;
     m.add_function(wrap_pyfunction!(verify_response, m)?)?;
