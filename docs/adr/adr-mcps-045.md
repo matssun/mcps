@@ -137,8 +137,14 @@ the live-cloud script. The ladder maps onto the phases:
   client lane + the cloud script. `--key-source gcp-kms` enforces the
   non-exporting profile; a default build refuses it rather than degrading.
   *Follow-up:* extract the KMS backend into a neutral shared crate so the client
-  need not depend on the server crate; the full four-hop T4 (BOTH identities in
-  KMS over the socket) runs from the cloud script with two distinct KMS keys.
+  need not depend on the server crate.
+  - **FOLLOW-UP — T4 integrated four-hop over Cloud KMS (NOT yet proven).** A
+    single live run with the client signer = Cloud KMS AND the server signer =
+    Cloud KMS over the real socket, the harness fetching BOTH public keys for the
+    trust wiring (two distinct KMS keys); manual/live-gated, validated only with
+    cloud credentials. v0.7 ships the two halves as separate live lanes (client
+    KMS signer + server KMS response signing) but does NOT claim the integrated
+    run — see CHANGELOG `[0.7.0]` "NOT yet claimed."
 - **Phase 5** (DONE) — sanitized two-version model: the real `work/` script stays
   gitignored; a committed placeholder (`scripts/test-gcp-cloud.sh.example`, all
   identifiers replaced) documents the full lane incl. the client KMS key; and a

@@ -9,6 +9,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
 or wire-format compatibility while the design lines from
 [`docs/adr/`](docs/adr/) settle.
 
+## [0.7.0] — Unreleased
+
+**End-to-end walkthrough — the v0.7 persona ladder.** v0.7 closes the
+"prove v0.7 end-to-end" gap with a real, multi-process MCP-S path: an ordinary
+plain-MCP client → `mcps-client-proxy-cli` (signs draft-02, dials mTLS) →
+`mcps-proxy` server PEP (verifies draft-02, strips, injects verified context,
+serves) → an unmodified inner MCP server, organized as a persona ladder of
+runnable tiers (ADR [045](docs/adr/adr-mcps-045.md)).
+
+### Proven in v0.7
+
+- **The real four-hop MCP-S path, offline.** T0/T1/T3 run the full topology as
+  separate OS processes over mTLS-on-loopback (`mcps-walkthrough`); the server PEP
+  now verifies AND serves draft-02 end to end (version-branched forward +
+  protected response; draft-01 path untouched).
+- **Scoped authorization, deny-before-dispatch.** A reader's `write_file` is
+  refused with `authorization_scope_denied` before the inner server is ever
+  reached (T2; the inner's own received-log confirms it across processes at T3).
+- **Transport-identity binding (T3).** `--transport-binding exact` ties the
+  verified mTLS client identity to the request signer; a mismatched identity is
+  denied before dispatch (proven by the inner's own append-only log + zero inner
+  spawns), while the same cert passes with binding off — isolating the binding as
+  the cause.
+- **Client Cloud KMS signer (offline + ignored live lane).** A non-exporting
+  `KmsClientSigner` (feature `gcp_kms`) signs through GCP Cloud KMS
+  (`EC_SIGN_ED25519`, no algorithm substitution); proven OFFLINE against the
+  unmodified `mcps-core` verifier via a no-network fake backend, plus an
+  `#[ignore]` live lane.
+- **Server Cloud KMS support (existing live lane).** `mcps-proxy --key-source
+  GcpKms` continues to sign responses from a non-exporting Cloud KMS key
+  (feature `gcp_kms_keysource`, live lanes).
+- **Secret-hygiene guard.** A tracked-file leak guard
+  (`mcps-walkthrough` `no_tracked_secrets`) asserts no real account/project
+  identifier is committed; the live-cloud script stays gitignored behind a
+  sanitized committed placeholder.
+- **Python SDK — request-side slice (#199).** `mcps-python-sdk` gains request
+  signing + custody/signer-policy binding (request side only;
+  ADR [044](docs/adr/adr-mcps-044.md)).
+
+### NOT yet claimed in v0.7
+
+- **A single integrated live-cloud four-hop with BOTH client and server signing
+  keys in Cloud KMS** over the real socket. Its two halves exist as separate
+  live lanes (client KMS signer + server KMS response signing), but they are not
+  yet stitched into one live four-hop run, which can only be validated with cloud
+  credentials. Tracked as the T4-integrated follow-up
+  (ADR [045](docs/adr/adr-mcps-045.md) Phase 4).
+- **Signed rejection reasons across the wire.** A client that fails closed cannot
+  yet surface the remote's specific reason (e.g. `transport_binding_failed`) — it
+  rides an unsigned error body the client rightly distrusts. The fix (signed
+  rejection receipts) is designed, not built: ADR
+  [046](docs/adr/adr-mcps-046.md).
+
 ## [0.6.0] — 2026-06-30
 
 **Runtime-evidence preimages — a `draft-02` wire-envelope change.** v0.6
