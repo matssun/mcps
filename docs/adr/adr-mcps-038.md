@@ -64,6 +64,13 @@ or `result.content[*]._meta` is payload and stays signed. Recursive name-based e
 would let an attacker relocate security bytes under a reserved observability name to strip
 them from integrity coverage; the container-only rule is the strictly tighter boundary.
 
+## Non-goal / boundary
+
+MCP-S draft-02 does **not** use self-reported server name/version metadata as a security
+input. Authenticated server identity comes from transport identity and/or `server_signer`
+trust resolution. Server metadata is observability-only unless bound to a separate
+attestation or trusted-metadata profile.
+
 ## Alternatives Considered
 
 - **Overload the single `version` field to mean both profile version and byte scheme.**
