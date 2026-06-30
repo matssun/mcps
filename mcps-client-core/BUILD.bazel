@@ -32,3 +32,33 @@ nt_rust_test(
         "@crates_mcps//:serde_json",
     ],
 )
+
+# MCPS-41: full client round-trip — sign a request, the server signs the bound
+# response, the client verifies it back over the public API.
+nt_rust_test(
+    name = "response_roundtrip_test",
+    srcs = ["tests/response_roundtrip_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_client_core",
+        "//mcps-core:mcps_core",
+        "@crates_mcps//:serde_json",
+    ],
+)
+
+# MCPS-42: the enforcement engine accepts a genuinely-verified exchange in both
+# normative modes (the AcceptMcps path needs a real VerifiedResponse).
+nt_rust_test(
+    name = "enforcement_accept_test",
+    srcs = ["tests/enforcement_accept_test.rs"],
+    auto_cargo_toml = False,
+    bazel_build_cfg = False,
+    edition = "2021",
+    deps = [
+        ":mcps_client_core",
+        "//mcps-core:mcps_core",
+        "@crates_mcps//:serde_json",
+    ],
+)
