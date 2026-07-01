@@ -105,7 +105,12 @@ def verify_inbound_messages(
     fail-closed inbound policy — uniformly, whichever decode site the body came from.
     """
     outcomes: List[InboundOutcome] = []
-    for payload in decode_inbound(content_type, body):
+    try:
+        payloads = decode_inbound(content_type, body)
+    except Exception:
+        return [InboundOutcome("reject", reason="mcps.missing_envelope")]
+
+    for payload in payloads:
         if not payload:
             continue
         try:
