@@ -98,7 +98,11 @@ def verify_inbound_messages(
     ``request_hash``-verified and a server-initiated message is subjected to the
     fail-closed inbound policy — uniformly, whichever decode site the body came from.
     """
-    return [
-        verify_inbound(payload, config, correlation, now_unix=now_unix)
-        for payload in decode_inbound(content_type, body)
-    ]
+    outcomes: List[InboundOutcome] = []
+    for payload in decode_inbound(content_type, body):
+        try:
+            outcomes.append(verify_inbound(payload, config, correlation, now_unix=now_unix))
+        except (UnicodeDecodeError, ValueError, TypeError):
+            # Fail closed on malformed/unparseable inbound bytes.
+            outcomes.append(InboundOutcome("reject", reason="mcps.canonicalization_failed"))
+    return outcomes
