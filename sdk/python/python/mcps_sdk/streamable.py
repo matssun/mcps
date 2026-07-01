@@ -103,6 +103,8 @@ def verify_inbound_messages(
         payloads = decode_inbound(content_type, body)
     except UnicodeDecodeError:
         return [InboundOutcome("reject", reason="mcps.canonicalization_failed")]
+    if not payloads:
+        return [InboundOutcome("reject", reason="mcps.missing_envelope")]
 
     for payload in payloads:
         try:
