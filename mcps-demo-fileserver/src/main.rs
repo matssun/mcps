@@ -54,8 +54,9 @@ fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
-    let demo_root = demo_root
-        .ok_or_else(|| "usage: mcps-demo-fileserver --demo-root <DIR>".to_string())?;
+    let demo_root = demo_root.ok_or_else(|| {
+        "usage: mcps-demo-fileserver --demo-root <DIR> [--received-log <PATH>]".to_string()
+    })?
     // Env var is the fallback; an explicit flag wins.
     if received_log.is_none() {
         if let Ok(path) = std::env::var(RECEIVED_LOG_ENV) {
