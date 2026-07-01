@@ -100,7 +100,12 @@ def verify_inbound_messages(
     ``request_hash``-verified and a server-initiated message is subjected to the
     fail-closed inbound policy — uniformly, whichever decode site the body came from.
     """
-    return [
-        verify_inbound(payload, config, correlation, now_unix=now_unix)
-        for payload in decode_inbound(content_type, body)
-    ]
+    outcomes: List[InboundOutcome] = []
+    for payload in decode_inbound(content_type, body):
+        if not payload:
+            continue
+        try:
+            outcomes.append(verify_inbound(payload, config, correlation, now_unix=now_unix))
+        except Exception:
+            outcomes.append(InboundOutcome("reject", reason="mcps.missing_envelope"))
+    return outcomes
