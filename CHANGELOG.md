@@ -64,8 +64,11 @@ runnable tiers (ADR [045](docs/adr/adr-mcps-045.md)).
   green in the matrix; and with `--key-source gcp-kms` the Python client signs every
   request with a NON-EXPORTING Cloud KMS key (`Signer.non_exporting` → `asymmetric
   Sign`) across the integrated four-hop (`t4_python_kms_custody`, live, #[ignore]).
-  Surfaced (and fixed) a real cross-language cert defect: the demo TLS leaves lacked
-  an Authority Key Identifier — tolerated by rustls, rejected by OpenSSL (Python).
+  Both the happy path AND the untrusted-server negative are proven cross-language
+  through the four-hop: every driver must fail closed when it cannot verify the
+  server's response. Surfaced (and fixed) a real cross-language cert defect: the demo
+  TLS leaves lacked an Authority Key Identifier — tolerated by rustls, rejected by
+  OpenSSL (Python).
 
 ### NOT yet claimed in v0.7
 
@@ -78,8 +81,9 @@ runnable tiers (ADR [045](docs/adr/adr-mcps-045.md)).
 ### Build & test
 
 The **Cargo** workspace is the authoritative, maintained test gate and is fully
-green (116 test binaries, 0 failures). The Cloud KMS lanes are intentionally
-`#[ignore]`/manual (they require live cloud credentials). The **Bazel** build has
+green (1104 tests across the workspace, 0 failures). The Cloud KMS lanes and the
+live cross-language KMS four-hop are intentionally `#[ignore]`/manual (they require
+live cloud credentials). The **Bazel** build has
 known, pre-existing **non-gating** `BUILD`-file parity rot — unrelated to this
 release — e.g. `//mcps-proxy:mcps_proxy_cli` missing a `//mcps-core:mcps_core`
 dep (present already before this epic) and `pkcs11` test-dep gaps; tracked
