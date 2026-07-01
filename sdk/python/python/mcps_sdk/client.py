@@ -121,7 +121,11 @@ async def connect_mtls_http(
     def post_sync(body: bytes) -> "tuple[str, bytes]":
         """One mTLS HTTP/1.1 POST; returns ``(content_type, response_body)``."""
         raw = socket.create_connection((host, port), timeout=timeout)
-        tls = ctx.wrap_socket(raw, server_hostname=server_name)
+        try:
+            tls = ctx.wrap_socket(raw, server_hostname=server_name)
+        except Exception:
+            raw.close()
+            raise
         try:
             head = (
                 f"POST / HTTP/1.1\r\nHost: {server_name}\r\n"
