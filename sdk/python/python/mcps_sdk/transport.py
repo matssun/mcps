@@ -66,9 +66,9 @@ class McpsConfig:
     # notification — NOT a response to one of our signed requests). The MCP-S
     # evidence model binds a server's signature to the client's `request_hash`; a
     # server-initiated message has none, so `mcps-client-core` cannot verify it.
-    # STRICT MCP-S is the client-initiated request/response subset (extended to
-    # signed multi-round-trip continuation by ADR-MCPS-047; ARBITRARY server push
-    # stays out of scope): the safe default FAILS CLOSED (an in-taxonomy reason).
+    # STRICT MCP-S is the client-initiated request/response subset (to be extended
+    # to signed multi-round-trip continuation by a future v0.8 profile; ARBITRARY
+    # server push stays out of scope): the safe default FAILS CLOSED (in-taxonomy).
     #
     # `True` is a DEGRADED / MIGRATION policy ONLY — it is an explicit operator
     # opt-OUT of the guarantee for the server-initiated channel, to run legacy

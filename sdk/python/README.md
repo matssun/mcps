@@ -30,12 +30,12 @@ signed requests and verified responses, added without changing application code.
 > standalone GET-SSE) to JSON-RPC payloads and routes EVERY one through the same
 > verification. Server-initiated messages (a server→client request/notification)
 > carry no `request_hash`, so the core cannot verify them and draft-02 defines no
-> evidence for this direction (ADR-MCPS-047). **Strict MCP-S is the client-initiated
+> evidence for this direction. **Strict MCP-S is the client-initiated
 > request/response subset:** the inbound policy **fails closed** by default
 > (`mcps.missing_envelope` / `mcps.notification_forbidden`).
 > `allow_unverified_server_initiated` is a **degraded/migration opt-out only**
-> (delivered, audited as no-evidence) — never strict MCP-S. ADR-MCPS-047 (stateless
-> multi-round-trip continuation) folds request-associated elicitation
+> (delivered, audited as no-evidence) — never strict MCP-S. A future v0.8 profile
+> (stateless multi-round-trip continuation) will fold request-associated elicitation
 > (`InputRequiredResult` → signed continuation) back into the strict request/response
 > profile; **arbitrary** server push stays out of scope and fails closed.
 >

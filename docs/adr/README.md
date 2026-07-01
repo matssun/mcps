@@ -52,7 +52,6 @@ maintainable as the project evolves.
 | [ADR-MCPS-044](adr-mcps-044.md) | Client-Side MCP-S Integration Model (Proposed, v0.7/v0.8) |
 | [ADR-MCPS-045](adr-mcps-045.md) | End-to-End Walkthrough — Tiered E2E Ladder and Client-Proxy Wire Interop (Proposed, v0.7) |
 | [ADR-MCPS-046](adr-mcps-046.md) | Signed Rejection Receipts (Proposed, v0.7+) |
-| [ADR-MCPS-047](adr-mcps-047.md) | Stateless Multi-Round-Trip Continuation Evidence (Proposed, v0.8+) |
 
 ## Provenance
 
