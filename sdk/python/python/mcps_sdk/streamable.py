@@ -107,7 +107,7 @@ def verify_inbound_messages(
     outcomes: List[InboundOutcome] = []
     try:
         payloads = decode_inbound(content_type, body)
-    except Exception:
+    except ValueError:
         return [InboundOutcome("reject", reason="mcps.missing_envelope")]
 
     for payload in payloads:
