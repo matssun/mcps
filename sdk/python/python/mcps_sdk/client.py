@@ -73,7 +73,11 @@ async def connect_stdio(
         async with connect(byte_send, byte_lines(), config) as session:
             yield session
     finally:
-        process.terminate()
+        # Close stdin then reap the subprocess so we don't leave a dangling child.
+        with anyio.move_on_after(5, shield=True):
+            await process.stdin.aclose()
+            process.terminate()
+            await process.wait()
 
 
 @asynccontextmanager
