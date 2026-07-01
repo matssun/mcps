@@ -4,7 +4,15 @@
 
 ## Status
 
-Proposed — v0.8+/post-walkthrough.
+Proposed — **targets v0.8**. The in-progress line is v0.7 (client integration +
+stateless discovery, ADR-MCPS-043/044; the workspace is still versioned 0.6.0 and
+v0.7 lands on `release/0.7`). This continuation profile is deferred to the next
+release, **v0.8**, and is delivered end to end across the stack: `mcps-core`
+(response classification + `InputRequiredResult` preimage hashing), `mcps-client-core`
+(non-terminal correlation + continuation signing/verification), the **client proxy**
+(`mcps-client-proxy`), and the **Python SDK** (`sdk/python`). It is NOT part of the
+v0.7 scope, which stays the client-initiated request/response subset; nothing here is
+implemented yet.
 
 Replaces the earlier broad "Bidirectional Runtime Evidence" framing. The newer
 stateless MCP model changes the problem: server-to-client requests are no longer
@@ -301,16 +309,25 @@ unnecessary general bidirectional evidence system.
 
 ## Implementation plan
 
+Delivered in v0.8 across the whole stack (core → client-core → client proxy → SDK),
+in this order:
+
 1. Extend `mcps-core` response classification to recognize a verified
    `InputRequiredResult`.
 2. Add response hashing for the signed `InputRequiredResult` preimage.
 3. Extend `mcps-client-core` correlation state to retain non-terminal
-   `InputRequiredResult` entries.
+   `InputRequiredResult` entries (associate-without-consume).
 4. Define the signed continuation metadata shape.
-5. Add continuation request signing support.
-6. Add server/proxy verification rules for continuation binding.
-7. Add conformance vectors.
-8. Keep arbitrary server push fail-closed under `require_mcps`.
+5. Add continuation request signing support in `mcps-client-core`.
+6. Add server/proxy verification rules for continuation binding (`mcps-proxy` PEP).
+7. Surface the flow through the adoption bridge — the **client proxy**
+   (`mcps-client-proxy`) drives the `InputRequiredResult` → continuation round trip
+   transparently for an unmodified MCP client.
+8. Bind it in the **Python SDK** (`sdk/python`): verify `InputRequiredResult`, hold
+   the non-terminal correlation entry, and sign the continuation — exposed so
+   `mcp.ClientSession` elicitation works under `require_mcps`.
+9. Add conformance vectors (shared corpus, exercised by core, proxy, and SDK).
+10. Keep arbitrary server push fail-closed under `require_mcps`.
 
 ## Open questions
 
