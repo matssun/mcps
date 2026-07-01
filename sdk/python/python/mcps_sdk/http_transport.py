@@ -144,14 +144,27 @@ class McpsHttpTransport:
         # inbound policy. The one-POST-per-request proxy contract yields exactly one
         # response, so a reject binds to this request's id (so the awaiting call
         # raises, not hangs); an accepted/passed-through message is delivered as-is.
-        for outcome in verify_inbound_messages(
-            content_type, body, self._config, self._correlation, now_unix=self._clock()
-        ):
+        try:
+            outcomes = verify_inbound_messages(
+                content_type,
+                body,
+                self._config,
+                self._correlation,
+                now_unix=self._clock(),
+            )
+        except Exception:
+            await self._app_read_send.send(self._reject_message(rid, "mcps.missing_envelope"))
+            return
+
+        if not outcomes:
+            await self._app_read_send.send(self._reject_message(rid, "mcps.missing_envelope"))
+            return
+
+        for outcome in outcomes:
             if outcome.kind in ("accept", "passthrough"):
                 await self._app_read_send.send(outcome.message)
             else:
                 await self._app_read_send.send(self._reject_message(rid, outcome.reason))
-
     @staticmethod
     def _reject_message(rid: Any, reason: Optional[str]) -> Any:
         from mcp.shared.message import SessionMessage

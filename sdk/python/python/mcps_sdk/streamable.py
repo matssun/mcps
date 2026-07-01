@@ -44,13 +44,15 @@ def sse_data_events(raw: bytes) -> List[bytes]:
     message (MCP emits one message per event). An event with no ``data`` field
     yields nothing.
     """
-    text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
     events: List[bytes] = []
     data_lines: List[str] = []
 
     def dispatch() -> None:
         if data_lines:
-            events.append("\n".join(data_lines).encode("utf-8"))
+            payload = "\n".join(data_lines)
+            if payload:
+                events.append(payload.encode("utf-8"))
             data_lines.clear()
 
     for line in text.split("\n"):
@@ -97,21 +99,13 @@ def verify_inbound_messages(
     :func:`~mcps_sdk.transport.verify_inbound`, so a correlated response is
     ``request_hash``-verified and a server-initiated message is subjected to the
     fail-closed inbound policy — uniformly, whichever decode site the body came from.
-
-    Resilient by design: a body that cannot even be decoded (e.g. non-UTF-8 SSE
-    bytes) fails closed as a single ``missing_envelope`` reject rather than crashing
-    the caller, and one malformed payload in a multi-message SSE body fails closed on
-    its own without poisoning the other (valid) messages in the same body.
     """
-    try:
-        payloads = decode_inbound(content_type, body)
-    except (UnicodeDecodeError, ValueError):
-        return [InboundOutcome("reject", reason="mcps.missing_envelope")]
-
     outcomes: List[InboundOutcome] = []
-    for payload in payloads:
+    for payload in decode_inbound(content_type, body):
+        if not payload:
+            continue
         try:
             outcomes.append(verify_inbound(payload, config, correlation, now_unix=now_unix))
-        except Exception:  # noqa: BLE001 — one bad payload fails closed, batch continues
+        except ValueError:
             outcomes.append(InboundOutcome("reject", reason="mcps.missing_envelope"))
     return outcomes

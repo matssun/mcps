@@ -9,7 +9,6 @@ subprocess (the common MCP stdio case).
 
 from __future__ import annotations
 
-import contextlib
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -74,9 +73,10 @@ async def connect_stdio(
         async with connect(byte_send, byte_lines(), config) as session:
             yield session
     finally:
-        # Reap the child so it does not linger as a zombie (terminate + await exit).
-        process.terminate()
-        with contextlib.suppress(Exception):
+        # Close stdin then reap the subprocess so we don't leave a dangling child.
+        with anyio.move_on_after(5, shield=True):
+            await process.stdin.aclose()
+            process.terminate()
             await process.wait()
 
 
@@ -124,7 +124,7 @@ async def connect_mtls_http(
         try:
             tls = ctx.wrap_socket(raw, server_hostname=server_name)
         except Exception:
-            raw.close()  # a handshake/config failure must not leak the TCP socket
+            raw.close()
             raise
         try:
             head = (

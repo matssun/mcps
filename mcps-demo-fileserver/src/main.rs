@@ -55,7 +55,7 @@ fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
         }
     }
     let demo_root = demo_root.ok_or_else(|| {
-        "usage: mcps-demo-fileserver --demo-root <DIR> [--received-log <FILE>]".to_string()
+        "usage: mcps-demo-fileserver --demo-root <DIR> [--received-log <PATH>]".to_string()
     })?;
     // Env var is the fallback; an explicit flag wins.
     if received_log.is_none() {
