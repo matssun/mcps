@@ -128,11 +128,15 @@ export class McpsHttpTransport implements Transport {
     try {
       ({ contentType, body } = await this.post(wire));
     } catch (err) {
+      // signOutbound already registered correlation; a transport failure must not leak it.
+      this.correlation.cancel(String(rid));
       this.onmessage?.(this.rejectMessage(rid, `mcps.transport_error: ${err instanceof Error ? err.message : err}`));
       return;
     }
-    if (this.closed) return;
-
+    if (this.closed) {
+      this.correlation.cancel(String(rid));
+      return;
+    }
     // Route the response through the multi-path decoder so a direct-JSON OR a (single)
     // SSE-framed response is verified the same way. The one-POST-per-request proxy
     // contract yields exactly one response, so a reject binds to this request's id (the
