@@ -153,7 +153,11 @@ function requestFields(message: JSONRPCMessage): RequestFields {
   const m = message as Record<string, unknown>;
   const id = m.id;
   const method = typeof m.method === "string" ? m.method : undefined;
-  return { isRequest: id !== undefined && method !== undefined, id, method, params: m.params };
+  // A request needs a string/number id (not null/undefined): verifyInbound treats a
+  // null id as uncorrelatable, so signing one would register a correlation entry whose
+  // response can never correlate. Keep the outbound predicate consistent with that.
+  const hasId = typeof id === "string" || typeof id === "number";
+  return { isRequest: hasId && method !== undefined, id, method, params: m.params };
 }
 
 /**

@@ -164,15 +164,25 @@ class McpsHttpTransport:
                 await self._app_read_send.send(self._reject_message(rid, "mcps.missing_envelope"))
                 return
 
-            if not outcomes:
-                await self._app_read_send.send(self._reject_message(rid, "mcps.missing_envelope"))
-                return
-
+            # The one-POST-per-request proxy contract yields exactly one response for this
+            # request. Deliver at most ONE outcome bound to `rid` (an accept OR a single
+            # reject) — a later interleaved message must not produce a contradictory second
+            # delivery (success then failure) for the same id. Server-initiated passthroughs
+            # are delivered as-is (they are not this request's response).
+            answered = False
             for outcome in outcomes:
-                if outcome.kind in ("accept", "passthrough"):
+                if outcome.kind == "accept":
+                    answered = True
                     await self._app_read_send.send(outcome.message)
-                else:
+                elif outcome.kind == "passthrough":
+                    await self._app_read_send.send(outcome.message)
+                elif not answered:
+                    answered = True
                     await self._app_read_send.send(self._reject_message(rid, outcome.reason))
+            if not answered:
+                # No correlated response decoded (empty body, or only server-initiated
+                # messages): fail closed so the awaiting call raises instead of hanging.
+                await self._app_read_send.send(self._reject_message(rid, "mcps.missing_envelope"))
         finally:
             # Reap our own correlation entry if this round trip produced no correlated
             # response for it (decode/verify failure, empty body, or a server-initiated

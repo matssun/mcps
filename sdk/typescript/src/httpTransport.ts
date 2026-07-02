@@ -153,18 +153,32 @@ export class McpsHttpTransport implements Transport {
     }
     // Route the response through the multi-path decoder so a direct-JSON OR a (single)
     // SSE-framed response is verified the same way. The one-POST-per-request proxy
-    // contract yields exactly one response, so a reject binds to this request's id (the
-    // awaiting call rejects, not hangs); an accepted/passed-through message is delivered.
+    // contract yields exactly one response for this request. Deliver at most ONE outcome
+    // bound to `rid` (an accept OR a single reject) — a later interleaved message must not
+    // produce a contradictory second delivery (success then failure) for the same id, nor
+    // cancel the correlation after an accept already consumed it. Server-initiated
+    // passthroughs are delivered as-is (they are not this request's response).
+    let answered = false;
     for (const outcome of verifyInboundMessages(contentType, body, this.config, this.correlation, {
       nowUnix: this.clock(),
       mrt: this.mrt,
     })) {
-      if (outcome.kind === "accept" || outcome.kind === "passthrough") {
+      if (outcome.kind === "accept") {
+        answered = true;
         this.onmessage?.(outcome.message as JSONRPCMessage);
-      } else {
+      } else if (outcome.kind === "passthrough") {
+        this.onmessage?.(outcome.message as JSONRPCMessage);
+      } else if (!answered) {
+        answered = true;
         this.correlation.cancel(String(rid));
         this.onmessage?.(this.rejectMessage(rid, outcome.reason));
       }
+    }
+    if (!answered) {
+      // No correlated response decoded (empty body, or only server-initiated messages):
+      // fail closed to `rid` so the awaiting call rejects instead of hanging.
+      this.correlation.cancel(String(rid));
+      this.onmessage?.(this.rejectMessage(rid, "mcps.missing_envelope"));
     }
   }
 
