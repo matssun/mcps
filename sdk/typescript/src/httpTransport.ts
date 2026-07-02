@@ -35,7 +35,7 @@ import type { CorrelationStore } from "../native/binding.js";
 import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { randomBytes } from "node:crypto";
-import { McpsConfig, signOutbound, TransportHooks } from "./transport.js";
+import { McpsConfig, MrtStore, signOutbound, TransportHooks } from "./transport.js";
 import { verifyInboundMessages } from "./streamable.js";
 
 /**
@@ -72,6 +72,11 @@ export class McpsHttpTransport implements Transport {
   private readonly correlation: CorrelationStore;
   private readonly clock: () => number;
   private readonly nonceFactory: () => string;
+  // ADR-MCPS-047 multi-round-trip state: requestState handle -> recorded continuation
+  // binding, shared across POSTs so a verified InputRequiredResult (recorded on its
+  // round trip) can be answered with a bound continuation on a later request. Without
+  // this, an answer leg would throw `mcps.continuation_malformed`.
+  private readonly mrt: MrtStore = new Map();
   private closed = false;
 
   constructor(post: PostFn, config: McpsConfig, hooks: TransportHooks = {}) {
@@ -117,6 +122,7 @@ export class McpsHttpTransport implements Transport {
         nowUnix: now,
         nonce: this.nonceFactory(),
         expiresUnix: now + (this.config.ttlSeconds ?? DEFAULT_TTL),
+        mrt: this.mrt,
       });
     } catch (err) {
       this.onmessage?.(this.rejectMessage(rid, err instanceof Error ? err.message : String(err)));
@@ -143,6 +149,7 @@ export class McpsHttpTransport implements Transport {
     // awaiting call rejects, not hangs); an accepted/passed-through message is delivered.
     for (const outcome of verifyInboundMessages(contentType, body, this.config, this.correlation, {
       nowUnix: this.clock(),
+      mrt: this.mrt,
     })) {
       if (outcome.kind === "accept" || outcome.kind === "passthrough") {
         this.onmessage?.(outcome.message as JSONRPCMessage);

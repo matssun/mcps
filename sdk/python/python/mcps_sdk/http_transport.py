@@ -88,6 +88,11 @@ class McpsHttpTransport:
         self._correlation = correlation or mcps_sdk.CorrelationStore()
         self._clock = clock or (lambda: int(time.time()))
         self._nonce_factory = nonce_factory or (lambda: secrets.token_urlsafe(16))
+        # ADR-MCPS-047 multi-round-trip state: requestState handle -> recorded
+        # continuation binding, shared across POSTs so a verified InputRequiredResult
+        # (recorded on its round trip) can be answered with a bound continuation on a
+        # later request. Without it, an answer leg raises `mcps.continuation_malformed`.
+        self._mrt: dict = {}
         self._tg = None
         self._app_read_send = None
         self._app_write_recv = None
@@ -136,6 +141,7 @@ class McpsHttpTransport:
             now_unix=now,
             nonce=self._nonce_factory(),
             expires_unix=now + self._config.ttl_seconds,
+            mrt=self._mrt,
         )
         content_type, body = await anyio.to_thread.run_sync(self._post, wire)
         # Route the response through the multi-path decoder so a direct-JSON OR a
@@ -152,6 +158,7 @@ class McpsHttpTransport:
                     self._config,
                     self._correlation,
                     now_unix=self._clock(),
+                    mrt=self._mrt,
                 )
             except Exception:
                 await self._app_read_send.send(self._reject_message(rid, "mcps.missing_envelope"))
