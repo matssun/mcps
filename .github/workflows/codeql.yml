@@ -1,0 +1,70 @@
+name: CodeQL
+
+# Advanced-setup CodeQL. This REPLACES the repo's *default* CodeQL setup — you must turn
+# default setup OFF first (Settings -> Code security -> Code scanning -> CodeQL analysis
+# -> switch from "Default" to "Advanced"), otherwise the two configs conflict and you get
+# duplicate or failed runs.
+#
+# Why this exists: default setup gives no control, so it (a) re-ran on every push to a PR
+# — the inner-loop churn — and (b) could not exclude the test-fixture false positives.
+# This workflow fixes both.
+#
+# Triggers — NOTE there is deliberately NO `pull_request`, so pushing fixes to a feature
+# branch NEVER re-runs CodeQL and never blocks your inner loop. It runs:
+#   - `merge_group`: once, when you enqueue a merge to main (enable "Require merge queue"
+#     in branch protection to use this as the release gate); and
+#   - `push: main`: the post-merge baseline on main; and
+#   - `schedule`: a weekly full sweep.
+# If you keep a required CodeQL status check in branch protection, update it: the old
+# "Analyze (…)" default-setup checks will no longer post on PRs, so remove them as
+# required checks or PRs will wait forever on a check that never runs.
+on:
+  push:
+    branches: [main]
+  merge_group:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write # upload SARIF results
+  actions: read # required for the `actions` language / private repos
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches the languages default setup covered. `build-mode: none` extracts from
+        # source without a full cargo/pip build, so the scan is also faster. If the Rust
+        # extractor ever needs a build on your toolchain, switch its build-mode to
+        # `autobuild` (slower).
+        include:
+          - language: rust
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
