@@ -9,6 +9,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
 or wire-format compatibility while the design lines from
 [`docs/adr/`](docs/adr/) settle.
 
+## [0.8.0] — 2026-07-02
+
+**Stateless multi-round-trip continuation + the TypeScript SDK.** v0.8 folds
+request-associated elicitation into strict MCP-S as signed multi-round-trip (MRT)
+continuation evidence (ADR [047](docs/adr/adr-mcps-047.md)), and ships a second
+client SDK — TypeScript — bound to the SAME audited `mcps-client-core` as the Python
+SDK and the proxy. Built on top of the released v0.7.0.
+
+### Added in v0.8
+
+- **Stateless MRT continuation evidence** (`mcps-core` / `mcps-client-core` /
+  `mcps-client-proxy`). A signed `InputRequiredResult` is verified as an ordinary
+  server response and classified non-terminal; the client answers with a fresh signed
+  continuation request bound to it (`previous_request_hash` +
+  `input_required_response_hash`), verified server-side by the ordinary draft-02
+  request path (the continuation object rides inside the signed preimage — no bespoke
+  proxy code). Non-terminal correlation is associate-without-consume; the client proxy
+  drives the elicitation → continuation round trip transparently. Shared conformance
+  vectors **d12–d15**.
+- **TypeScript SDK** (`sdk/typescript`, NEW). A `napi-rs` binding to the audited
+  `mcps-client-core` — the exact analog of the Python PyO3 binding, so the canonical
+  signed preimage is byte-identical across every SDK and the proxy by construction.
+  Transport adapters (stdio + one-POST-per-request mTLS), authorization-binding
+  providers, non-exporting (KMS/HSM) custody, and MRT continuation. Verified against
+  the same independent oracle vectors as the Python SDK.
+- **Python SDK** conformance driver gains MRT continuation support (parity with
+  TypeScript), so the interchangeable-driver matrix stays a true parity harness.
+- **Cross-SDK MRT parity matrix.** A safe, deterministic `delete_files` elicitation
+  tool on `mcps-demo-fileserver` (a dry-run that carries its pending state in the
+  opaque `requestState`) drives the elicitation → continuation SECURITY SHAPE end to
+  end through the real four-hop across the **Rust reference, Python, and TypeScript**
+  drivers.
+
+### Not in v0.8 (gaps / deferred)
+
+- **Arbitrary server push stays out of strict MCP-S** and fails closed under
+  `require_mcps` (ADR-047 / D9); `allow_unverified_server_initiated` remains a
+  degraded migration opt-out only, audited as no-evidence.
+- **ADR-MCPS-044 (Client-Side Integration Model) stays Proposed.** Both SDKs realize
+  it, but its full scope is not yet claimed complete — not overclaiming.
+- **ADR-MCPS-046 (Signed Rejection Receipts) stays deferred / design-only.**
+- **TypeScript SDK live cross-process mTLS e2es are not yet written.** The driver
+  matrix already exercises the TS SDK through the real four-hop; dedicated mTLS e2es
+  mirroring the Python `test_e2e_*` suite are a follow-up.
+- **The TypeScript conformance driver's Cloud KMS path signs via a synchronous
+  `curl`** (Node has no native synchronous HTTP, and the napi non-exporting sign
+  callback is synchronous); the offline/software path is fully in-process.
+
 ## [0.7.0] — 2026-07-02
 
 **End-to-end walkthrough — the v0.7 persona ladder.** v0.7 closes the

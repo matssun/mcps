@@ -285,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-client-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-core",
  "serde_json",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "ed25519-dalek",

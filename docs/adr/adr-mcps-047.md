@@ -4,10 +4,9 @@
 
 ## Status
 
-Proposed — **targets v0.8**. The in-progress line is v0.7 (client integration +
-stateless discovery, ADR-MCPS-043/044; the workspace is still versioned 0.6.0 and
-v0.7 lands on `release/0.7`). This continuation profile is delivered end to end
-across the stack for **v0.8** on branch `feat/adr-047-v0.8`: `mcps-core`
+Accepted (v0.8, 2026-07-02). Shipped on top of the released v0.7.0 (the client
+integration + stateless discovery line, ADR-MCPS-043/044). This continuation profile
+is delivered end to end across the stack for **v0.8**: `mcps-core`
 (the typed `continuation` binding + structural validator, `InputRequiredResult`
 classification, response preimage hashing), `mcps-client-core` (continuation signing
 via `RequestSigningInputs::with_continuation`, non-terminal correlation
