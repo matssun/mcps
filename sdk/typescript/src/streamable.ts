@@ -109,7 +109,12 @@ export function verifyInboundMessages(
   correlation: CorrelationStore,
   opts: { nowUnix: number; mrt?: MrtStore },
 ): InboundOutcome[] {
-  return decodeInbound(contentType, body).map((payload) =>
-    verifyInbound(payload, config, correlation, { nowUnix: opts.nowUnix, mrt: opts.mrt }),
-  );
+  return decodeInbound(contentType, body).map((payload) => {
+    try {
+      return verifyInbound(payload, config, correlation, { nowUnix: opts.nowUnix, mrt: opts.mrt });
+    } catch {
+      // Fail closed on any decode/parse failure.
+      return { kind: "reject", reason: "mcps.missing_envelope" };
+    }
+  });
 }
