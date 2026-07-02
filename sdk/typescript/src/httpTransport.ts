@@ -147,6 +147,7 @@ export class McpsHttpTransport implements Transport {
       if (outcome.kind === "accept" || outcome.kind === "passthrough") {
         this.onmessage?.(outcome.message as JSONRPCMessage);
       } else {
+        this.correlation.cancel(String(rid));
         this.onmessage?.(this.rejectMessage(rid, outcome.reason));
       }
     }
