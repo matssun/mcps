@@ -109,12 +109,18 @@ export function verifyInboundMessages(
   correlation: CorrelationStore,
   opts: { nowUnix: number; mrt?: MrtStore },
 ): InboundOutcome[] {
-  return decodeInbound(contentType, body).map((payload) => {
+  const outcomes: InboundOutcome[] = [];
+  for (const payload of decodeInbound(contentType, body)) {
+    // Skip empty / whitespace-only payloads rather than failing them closed — an SSE
+    // heartbeat or blank event (`data:\n\n`) yields a zero-length Buffer and is not a
+    // message. Parity with the Python SDK (`if not payload: continue`).
+    if (payload.toString("utf-8").trim().length === 0) continue;
     try {
-      return verifyInbound(payload, config, correlation, { nowUnix: opts.nowUnix, mrt: opts.mrt });
+      outcomes.push(verifyInbound(payload, config, correlation, { nowUnix: opts.nowUnix, mrt: opts.mrt }));
     } catch {
       // Fail closed on any decode/parse failure.
-      return { kind: "reject", reason: "mcps.missing_envelope" };
+      outcomes.push({ kind: "reject", reason: "mcps.missing_envelope" });
     }
-  });
+  }
+  return outcomes;
 }

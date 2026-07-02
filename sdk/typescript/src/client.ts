@@ -47,7 +47,9 @@ export function connectStdio(
 ): McpsTransport {
   const child = spawn(command, args, {
     stdio: ["pipe", "pipe", "inherit"],
-    env: opts.env,
+    // Merge over the parent environment so callers that set a few vars don't drop PATH
+    // and other required defaults (spawn REPLACES the whole env when `env` is given).
+    env: opts.env ? { ...process.env, ...opts.env } : undefined,
   });
   const byteSend = (data: Buffer): Promise<void> =>
     new Promise((resolve, reject) => {

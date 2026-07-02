@@ -92,8 +92,16 @@ export class McpsHttpTransport implements Transport {
   }
 
   async send(message: JSONRPCMessage, _options?: TransportSendOptions): Promise<void> {
+    if (this.closed) {
+      // Do not schedule a round trip on a logically closed transport (no POST, no
+      // correlation entry). close() has already fired onclose.
+      return;
+    }
     const m = message as Record<string, unknown>;
-    const isRequest = m.id !== undefined && typeof m.method === "string";
+    // A request has a string method AND a string/number id. Restrict the id type up
+    // front: a null/object id would produce a bogus correlation key (String(rid)) and an
+    // invalid JSON-RPC error id on a reject.
+    const isRequest = (typeof m.id === "string" || typeof m.id === "number") && typeof m.method === "string";
     if (!isRequest) {
       // A notification (or a response to a server-initiated request). The
       // request/response transport has no fire-and-forget channel and the minimal proxy

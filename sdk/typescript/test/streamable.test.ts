@@ -108,6 +108,15 @@ describe("uniform verification across decode sites", () => {
     expect(outcomes.map((o) => o.kind)).toEqual(["accept"]);
   });
 
+  it("skips empty SSE events (heartbeats) instead of failing them closed", () => {
+    // An empty `data:` event yields a zero-length payload — a heartbeat, not a message.
+    // It must be skipped (parity with Python), so only the real response is verified.
+    const outcomes = verifyInboundMessages("text/event-stream", sse("", validResponse(), ""), config(), registered(), {
+      nowUnix: NOW + 1,
+    });
+    expect(outcomes.map((o) => o.kind)).toEqual(["accept"]);
+  });
+
   it("SSE server-initiated notification fails closed", () => {
     const notif = JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: {} });
     const outcomes = verifyInboundMessages("text/event-stream", sse(notif), config(), new CorrelationStore(), {
