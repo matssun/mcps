@@ -333,7 +333,9 @@ fn corpus() -> Vec<Fixture> {
     // Present as draft-01 by removing draft-02-only fields (it never reaches a
     // verifier — the policy refuses the version at dispatch).
     {
-        let env = d07["params"]["_meta"][REQUEST_META_KEY].as_object_mut().unwrap();
+        let env = d07["params"]["_meta"][REQUEST_META_KEY]
+            .as_object_mut()
+            .unwrap();
         env.insert("version".into(), json!("draft-01"));
         env.remove("canonicalization_id");
         env.remove("authorization_binding");
@@ -411,6 +413,84 @@ fn corpus() -> Vec<Fixture> {
         message: Some(d11),
         raw_text: None,
         check: only.clone(),
+        expected: "verify_ok",
+    });
+
+    // d12 — valid signed continuation request (ADR-MCPS-047 / D4): an ordinary
+    // draft-02 request carrying a well-formed `continuation` binding, signed over
+    // the whole preimage. Verifies like any request; the continuation is protected.
+    let prev_hash = format!("sha256:{DIGEST_VALUE}");
+    let resp_hash = "sha256:47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
+    let mut d12 = request_unsigned("req-12", "hello");
+    d12["params"]["_meta"][REQUEST_META_KEY]["continuation"] = json!({
+        "type": "mcp-mrt",
+        "previous_request_hash": prev_hash,
+        "input_required_response_hash": resp_hash,
+    });
+    sign_request(&mut d12);
+    out.push(Fixture {
+        name: "d12_valid_continuation_request",
+        file: "d12_valid_continuation_request.json",
+        message: Some(d12),
+        raw_text: None,
+        check: only.clone(),
+        expected: "verify_ok",
+    });
+
+    // d13 — continuation with an unsupported `type`, signed over it (VALID
+    // signature) so the vector proves the structural check fires FIRST and is
+    // distinct from a signature failure (D4 fail-closed).
+    let mut d13 = request_unsigned("req-13", "hello");
+    d13["params"]["_meta"][REQUEST_META_KEY]["continuation"] = json!({
+        "type": "future-mrt-profile",
+        "previous_request_hash": prev_hash,
+        "input_required_response_hash": resp_hash,
+    });
+    sign_request(&mut d13);
+    out.push(Fixture {
+        name: "d13_continuation_type_unsupported",
+        file: "d13_continuation_type_unsupported.json",
+        message: Some(d13),
+        raw_text: None,
+        check: only.clone(),
+        expected: "mcps.continuation_type_unsupported",
+    });
+
+    // d14 — structurally malformed continuation (missing a mandatory hash), signed
+    // over it: the malformed-binding token surfaces before crypto.
+    let mut d14 = request_unsigned("req-14", "hello");
+    d14["params"]["_meta"][REQUEST_META_KEY]["continuation"] = json!({
+        "type": "mcp-mrt",
+        "previous_request_hash": prev_hash,
+    });
+    sign_request(&mut d14);
+    out.push(Fixture {
+        name: "d14_continuation_malformed",
+        file: "d14_continuation_malformed.json",
+        message: Some(d14),
+        raw_text: None,
+        check: only.clone(),
+        expected: "mcps.continuation_malformed",
+    });
+
+    // d15 — signed InputRequiredResult response (ADR-MCPS-047 / D2): a non-terminal
+    // elicitation result verifies as an ordinary signed draft-02 response. The
+    // client classifies + continues only AFTER this verifies. Bound to d09's req_hash.
+    let mut d15 = response_unsigned(&req_hash);
+    d15["result"]["resultType"] = json!("inputRequired");
+    d15["result"]["inputRequests"] =
+        json!({ "confirm": { "type": "elicitation", "message": "Delete 3 files?" } });
+    d15["result"]["requestState"] = json!("eyJzdGVwIjoxfQ");
+    sign_response(&mut d15);
+    out.push(Fixture {
+        name: "d15_signed_input_required_response",
+        file: "d15_signed_input_required_response.json",
+        message: Some(d15),
+        raw_text: None,
+        check: Check::Response {
+            expected_request_hash: req_hash.clone(),
+            expected_canonicalization_id: CANON_ID.to_string(),
+        },
         expected: "verify_ok",
     });
 
@@ -508,9 +588,7 @@ fn manifest_entry(fixture: &Fixture) -> Value {
             entry.insert("kind".into(), json!("request"));
             let (accepted, downgrade): (Vec<&str>, bool) = match policy {
                 ExpectedVersionPolicy::Draft02Only => (vec!["draft-02"], true),
-                ExpectedVersionPolicy::Draft01AndDraft02 => {
-                    (vec!["draft-01", "draft-02"], false)
-                }
+                ExpectedVersionPolicy::Draft01AndDraft02 => (vec!["draft-01", "draft-02"], false),
             };
             entry.insert(
                 "version_policy".into(),
@@ -587,8 +665,9 @@ fn committed_corpus_matches_regenerated() {
     let dir = vectors_dir();
     for fixture in corpus() {
         let path = dir.join(fixture.file);
-        let committed = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read committed {path:?}: {e} (run write_draft02_fixtures)"));
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("read committed {path:?}: {e} (run write_draft02_fixtures)")
+        });
         assert_eq!(
             committed,
             fixture_file_body(&fixture),
@@ -634,7 +713,10 @@ fn static_oracle_matches_recomputed_bytes() {
         let Some(oracle) = entry.get("oracle") else {
             continue; // malformed-before-preimage fixtures carry no oracle.
         };
-        let message = fixture.message.as_ref().expect("oracle fixture has a message");
+        let message = fixture
+            .message
+            .as_ref()
+            .expect("oracle fixture has a message");
         let recomputed = match &fixture.check {
             Check::Request { .. } => oracle_for_request(message),
             Check::Response { .. } => oracle_for_response(message),
@@ -646,7 +728,10 @@ fn static_oracle_matches_recomputed_bytes() {
         );
         checked += 1;
     }
-    assert!(checked >= 7, "expected a healthy set of oracle-backed fixtures, got {checked}");
+    assert!(
+        checked >= 7,
+        "expected a healthy set of oracle-backed fixtures, got {checked}"
+    );
 }
 
 /// The draft-01 corpus is provably untouched: its manifest is a sibling

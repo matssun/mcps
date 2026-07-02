@@ -170,3 +170,15 @@ def test_sse_server_initiated_passthrough_when_allowed():
         _config(allow_unverified_server_initiated=True), mcps_sdk.CorrelationStore(), now_unix=NOW,
     )
     assert outcomes[0].kind == "passthrough"
+
+
+def test_sse_server_initiated_request_fails_closed():
+    """A server-initiated REQUEST (id + method) framed in an SSE event is arbitrary
+    server push (no request_hash binding) and fails closed via the same decode->verify
+    path — proving the SSE site handles id-bearing server requests, not just notifications."""
+    req = json.dumps({"jsonrpc": "2.0", "id": "s-9", "method": "sampling/createMessage", "params": {}})
+    outcomes = verify_inbound_messages(
+        "text/event-stream", _sse(req), _config(), mcps_sdk.CorrelationStore(), now_unix=NOW
+    )
+    assert outcomes[0].kind == "reject"
+    assert outcomes[0].reason == "mcps.missing_envelope"

@@ -9,12 +9,12 @@
 
 use mcps_client_core::{
     audit_for_decision, build_signed_request, classify_response_result, decide,
-    verify_signed_response, ClientOutcome, ClientPath, EnforcementDecision, EnforcementMode,
+    verify_and_classify_response, ClientOutcome, ClientPath, EnforcementDecision, EnforcementMode,
     RequestSigningInputs, ResponseExpectation,
 };
 use mcps_core::{
-    response_signing_preimage, AuthorizationBinding, InMemoryTrustResolver, SigningKey,
-    CANONICALIZATION_ID_INT53_V1, RESPONSE_META_KEY, SIG_ALG_ED25519, VERSION_DRAFT_02,
+    response_signing_preimage, AuthorizationBinding, InMemoryTrustResolver, ResultClass,
+    SigningKey, CANONICALIZATION_ID_INT53_V1, RESPONSE_META_KEY, SIG_ALG_ED25519, VERSION_DRAFT_02,
 };
 use serde_json::{json, Map, Value};
 
@@ -54,7 +54,12 @@ fn client_request_hash() -> String {
 }
 
 /// A server-signed draft-02 response binding `request_hash`.
-fn signed_response(request_hash: &str, server_seed: &[u8; 32], signer: &str, key_id: &str) -> Value {
+fn signed_response(
+    request_hash: &str,
+    server_seed: &[u8; 32],
+    signer: &str,
+    key_id: &str,
+) -> Value {
     let key = SigningKey::from_seed_bytes(server_seed);
     let mut object = json!({
         "jsonrpc": "2.0",
@@ -68,6 +73,33 @@ fn signed_response(request_hash: &str, server_seed: &[u8; 32], signer: &str, key
                 "server_signer": signer,
                 "issued_at": "2026-06-30T20:00:01Z",
                 "signature": { "alg": SIG_ALG_ED25519, "key_id": key_id },
+            }}
+        }
+    });
+    let preimage = response_signing_preimage(&object).unwrap();
+    object["result"]["_meta"][RESPONSE_META_KEY]["signature"]["value"] =
+        Value::String(key.sign(&preimage));
+    object
+}
+
+/// A server-signed InputRequiredResult response (ADR-MCPS-047 / D2): a non-terminal
+/// elicitation result, signed as an ordinary draft-02 response.
+fn signed_input_required_response(request_hash: &str) -> Value {
+    let key = SigningKey::from_seed_bytes(&SERVER_SEED);
+    let mut object = json!({
+        "jsonrpc": "2.0",
+        "id": "req-1",
+        "result": {
+            "resultType": "inputRequired",
+            "inputRequests": { "confirm": { "type": "elicitation", "message": "Delete 3 files?" } },
+            "requestState": "eyJzdGVwIjoxfQ",
+            "_meta": { RESPONSE_META_KEY: {
+                "version": VERSION_DRAFT_02,
+                "canonicalization_id": CANONICALIZATION_ID_INT53_V1,
+                "request_hash": request_hash,
+                "server_signer": SERVER_SIGNER,
+                "issued_at": "2026-06-30T20:00:01Z",
+                "signature": { "alg": SIG_ALG_ED25519, "key_id": SERVER_KEY_ID },
             }}
         }
     });
@@ -100,12 +132,25 @@ fn scenario(
         _ => unreachable!(),
     };
 
-    let result = verify_signed_response(&bytes, resolver, &expectation);
-    let verified = result
-        .as_ref()
-        .ok()
-        .map(|v| (v.server_signer().to_string(), v.key_id().to_string(), v.request_hash().to_string()));
-    let outcome = classify_response_result(result);
+    let classified = verify_and_classify_response(&bytes, resolver, &expectation);
+    let verified = classified.as_ref().ok().map(|c| {
+        (
+            c.verified.server_signer().to_string(),
+            c.verified.key_id().to_string(),
+            c.verified.request_hash().to_string(),
+        )
+    });
+    let (result_class, response_hash) = match classified.as_ref().ok() {
+        Some(c) => (
+            match c.class {
+                ResultClass::Terminal => "terminal",
+                ResultClass::InputRequired => "input_required",
+            },
+            json!(c.response_hash),
+        ),
+        None => ("terminal", Value::Null),
+    };
+    let outcome = classify_response_result(classified.map(|c| c.verified));
     let decision = decide(mode, legacy_allowed, &outcome);
     let audit = audit_for_decision(&decision);
 
@@ -147,13 +192,17 @@ fn scenario(
             "key_id": kid,
             "request_hash": rh,
             "accepted": accepted,
+            "result_class": result_class,
+            "response_hash": response_hash,
         },
     })
 }
 
 fn main() {
     let rh = client_request_hash();
-    let server_pk = SigningKey::from_seed_bytes(&SERVER_SEED).public_key().to_bytes();
+    let server_pk = SigningKey::from_seed_bytes(&SERVER_SEED)
+        .public_key()
+        .to_bytes();
 
     // The resolver every scenario uses: the legitimate server's public key only.
     let mut resolver = InMemoryTrustResolver::new();
@@ -186,14 +235,120 @@ fn main() {
         SERVER_KEY_ID,
     );
 
+    // A verified, NON-TERMINAL InputRequiredResult (ADR-MCPS-047): accepted evidence
+    // that classifies as input_required and carries a response_hash.
+    let input_required = signed_input_required_response(&rh);
+
+    // Tampered elicitation prompt / continuation state (ADR-MCPS-047 / D2): both are
+    // inside the signed response preimage, so flipping them AFTER signing breaks the
+    // signature — a server prompt or requestState cannot be forged in flight.
+    let mut ir_tampered_requests = input_required.clone();
+    ir_tampered_requests["result"]["inputRequests"]["confirm"]["message"] =
+        json!("Keep all files?");
+    let mut ir_tampered_state = input_required.clone();
+    ir_tampered_state["result"]["requestState"] = json!("dGFtcGVyZWQtc3RhdGU");
+
     let scenarios = json!([
-        scenario("valid", &valid, &resolver, &rh, None, Some(SERVER_SIGNER), "require_mcps", false),
-        scenario("unsigned_require_mcps", &unsigned, &resolver, &rh, None, None, "require_mcps", false),
-        scenario("tampered_signature", &tampered, &resolver, &rh, None, None, "require_mcps", false),
-        scenario("unresolvable_signer", &evil, &resolver, &rh, None, None, "require_mcps", false),
-        scenario("request_hash_mismatch", &wrong_hash, &resolver, &rh, None, None, "require_mcps", false),
-        scenario("canonicalization_mismatch", &valid, &resolver, &rh, Some("mcps-jcs-int53-json-v9-mismatch"), None, "require_mcps", false),
-        scenario("pinned_signer_mismatch", &valid, &resolver, &rh, None, Some("did:example:other-tenant"), "require_mcps", false),
+        scenario(
+            "valid",
+            &valid,
+            &resolver,
+            &rh,
+            None,
+            Some(SERVER_SIGNER),
+            "require_mcps",
+            false
+        ),
+        scenario(
+            "input_required",
+            &input_required,
+            &resolver,
+            &rh,
+            None,
+            Some(SERVER_SIGNER),
+            "require_mcps",
+            false
+        ),
+        scenario(
+            "input_required_tampered_input_requests",
+            &ir_tampered_requests,
+            &resolver,
+            &rh,
+            None,
+            Some(SERVER_SIGNER),
+            "require_mcps",
+            false
+        ),
+        scenario(
+            "input_required_tampered_request_state",
+            &ir_tampered_state,
+            &resolver,
+            &rh,
+            None,
+            Some(SERVER_SIGNER),
+            "require_mcps",
+            false
+        ),
+        scenario(
+            "unsigned_require_mcps",
+            &unsigned,
+            &resolver,
+            &rh,
+            None,
+            None,
+            "require_mcps",
+            false
+        ),
+        scenario(
+            "tampered_signature",
+            &tampered,
+            &resolver,
+            &rh,
+            None,
+            None,
+            "require_mcps",
+            false
+        ),
+        scenario(
+            "unresolvable_signer",
+            &evil,
+            &resolver,
+            &rh,
+            None,
+            None,
+            "require_mcps",
+            false
+        ),
+        scenario(
+            "request_hash_mismatch",
+            &wrong_hash,
+            &resolver,
+            &rh,
+            None,
+            None,
+            "require_mcps",
+            false
+        ),
+        scenario(
+            "canonicalization_mismatch",
+            &valid,
+            &resolver,
+            &rh,
+            Some("mcps-jcs-int53-json-v9-mismatch"),
+            None,
+            "require_mcps",
+            false
+        ),
+        scenario(
+            "pinned_signer_mismatch",
+            &valid,
+            &resolver,
+            &rh,
+            None,
+            Some("did:example:other-tenant"),
+            "require_mcps",
+            false
+        ),
     ]);
 
     let fixture = json!({

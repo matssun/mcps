@@ -11,6 +11,8 @@
         "path": "mcps-verified",
         "reason": null,
         "request_hash": "sha256:_x78gCasHadWnYeLVbfx8djdTKWjv28HjLgQ4iFm0r4",
+        "response_hash": "sha256:9l2KVdLr46CN7MVWviH-TQbWRiZp1jgzr1ygMXj3bfw",
+        "result_class": "terminal",
         "server_signer": "did:example:server"
       },
       "name": "valid",
@@ -25,6 +27,75 @@
     },
     {
       "expected": {
+        "accepted": true,
+        "decision": "accept",
+        "key_id": "server-key-1",
+        "outcome": "accepted",
+        "path": "mcps-verified",
+        "reason": null,
+        "request_hash": "sha256:_x78gCasHadWnYeLVbfx8djdTKWjv28HjLgQ4iFm0r4",
+        "response_hash": "sha256:TKyCB3DqV8xEDV1g4hVY82oa59svm9mD85iOs-Alalc",
+        "result_class": "input_required",
+        "server_signer": "did:example:server"
+      },
+      "name": "input_required",
+      "params": {
+        "enforcement_mode": "require_mcps",
+        "expected_canonicalization_id": null,
+        "expected_request_hash": "sha256:_x78gCasHadWnYeLVbfx8djdTKWjv28HjLgQ4iFm0r4",
+        "expected_server_signer": "did:example:server",
+        "legacy_allowed": false
+      },
+      "response_bytes": "{\"id\":\"req-1\",\"jsonrpc\":\"2.0\",\"result\":{\"_meta\":{\"se.syncom/mcps.response\":{\"canonicalization_id\":\"mcps-jcs-int53-json-v1\",\"issued_at\":\"2026-06-30T20:00:01Z\",\"request_hash\":\"sha256:_x78gCasHadWnYeLVbfx8djdTKWjv28HjLgQ4iFm0r4\",\"server_signer\":\"did:example:server\",\"signature\":{\"alg\":\"Ed25519\",\"key_id\":\"server-key-1\",\"value\":\"7T1HasPPu7A8B26pbrGdGG0HkB1ixUvpzKYvO8lHvugyKkDpKc2JxJ1ZGjrAq7P-sHeDElwJDSoKgKeYVbWxDA\"},\"version\":\"draft-02\"}},\"inputRequests\":{\"confirm\":{\"message\":\"Delete 3 files?\",\"type\":\"elicitation\"}},\"requestState\":\"eyJzdGVwIjoxfQ\",\"resultType\":\"inputRequired\"}}"
+    },
+    {
+      "expected": {
+        "accepted": false,
+        "decision": "fail-closed",
+        "key_id": null,
+        "outcome": "rejected",
+        "path": "mcps-verified",
+        "reason": "mcps.response_sig_invalid",
+        "request_hash": null,
+        "response_hash": null,
+        "result_class": "terminal",
+        "server_signer": null
+      },
+      "name": "input_required_tampered_input_requests",
+      "params": {
+        "enforcement_mode": "require_mcps",
+        "expected_canonicalization_id": null,
+        "expected_request_hash": "sha256:_x78gCasHadWnYeLVbfx8djdTKWjv28HjLgQ4iFm0r4",
+        "expected_server_signer": "did:example:server",
+        "legacy_allowed": false
+      },
+      "response_bytes": "{\"id\":\"req-1\",\"jsonrpc\":\"2.0\",\"result\":{\"_meta\":{\"se.syncom/mcps.response\":{\"canonicalization_id\":\"mcps-jcs-int53-json-v1\",\"issued_at\":\"2026-06-30T20:00:01Z\",\"request_hash\":\"sha256:_x78gCasHadWnYeLVbfx8djdTKWjv28HjLgQ4iFm0r4\",\"server_signer\":\"did:example:server\",\"signature\":{\"alg\":\"Ed25519\",\"key_id\":\"server-key-1\",\"value\":\"7T1HasPPu7A8B26pbrGdGG0HkB1ixUvpzKYvO8lHvugyKkDpKc2JxJ1ZGjrAq7P-sHeDElwJDSoKgKeYVbWxDA\"},\"version\":\"draft-02\"}},\"inputRequests\":{\"confirm\":{\"message\":\"Keep all files?\",\"type\":\"elicitation\"}},\"requestState\":\"eyJzdGVwIjoxfQ\",\"resultType\":\"inputRequired\"}}"
+    },
+    {
+      "expected": {
+        "accepted": false,
+        "decision": "fail-closed",
+        "key_id": null,
+        "outcome": "rejected",
+        "path": "mcps-verified",
+        "reason": "mcps.response_sig_invalid",
+        "request_hash": null,
+        "response_hash": null,
+        "result_class": "terminal",
+        "server_signer": null
+      },
+      "name": "input_required_tampered_request_state",
+      "params": {
+        "enforcement_mode": "require_mcps",
+        "expected_canonicalization_id": null,
+        "expected_request_hash": "sha256:_x78gCasHadWnYeLVbfx8djdTKWjv28HjLgQ4iFm0r4",
+        "expected_server_signer": "did:example:server",
+        "legacy_allowed": false
+      },
+      "response_bytes": "{\"id\":\"req-1\",\"jsonrpc\":\"2.0\",\"result\":{\"_meta\":{\"se.syncom/mcps.response\":{\"canonicalization_id\":\"mcps-jcs-int53-json-v1\",\"issued_at\":\"2026-06-30T20:00:01Z\",\"request_hash\":\"sha256:_x78gCasHadWnYeLVbfx8djdTKWjv28HjLgQ4iFm0r4\",\"server_signer\":\"did:example:server\",\"signature\":{\"alg\":\"Ed25519\",\"key_id\":\"server-key-1\",\"value\":\"7T1HasPPu7A8B26pbrGdGG0HkB1ixUvpzKYvO8lHvugyKkDpKc2JxJ1ZGjrAq7P-sHeDElwJDSoKgKeYVbWxDA\"},\"version\":\"draft-02\"}},\"inputRequests\":{\"confirm\":{\"message\":\"Delete 3 files?\",\"type\":\"elicitation\"}},\"requestState\":\"dGFtcGVyZWQtc3RhdGU\",\"resultType\":\"inputRequired\"}}"
+    },
+    {
+      "expected": {
         "accepted": false,
         "decision": "fail-closed",
         "key_id": null,
@@ -32,6 +103,8 @@
         "path": "mcps-verified",
         "reason": "mcps.missing_envelope",
         "request_hash": null,
+        "response_hash": null,
+        "result_class": "terminal",
         "server_signer": null
       },
       "name": "unsigned_require_mcps",
@@ -53,6 +126,8 @@
         "path": "mcps-verified",
         "reason": "mcps.response_sig_invalid",
         "request_hash": null,
+        "response_hash": null,
+        "result_class": "terminal",
         "server_signer": null
       },
       "name": "tampered_signature",
@@ -74,6 +149,8 @@
         "path": "mcps-verified",
         "reason": "mcps.actor_binding_failed",
         "request_hash": null,
+        "response_hash": null,
+        "result_class": "terminal",
         "server_signer": null
       },
       "name": "unresolvable_signer",
@@ -95,6 +172,8 @@
         "path": "mcps-verified",
         "reason": "mcps.response_hash_mismatch",
         "request_hash": null,
+        "response_hash": null,
+        "result_class": "terminal",
         "server_signer": null
       },
       "name": "request_hash_mismatch",
@@ -116,6 +195,8 @@
         "path": "mcps-verified",
         "reason": "mcps.canonicalization_id_mismatch",
         "request_hash": null,
+        "response_hash": null,
+        "result_class": "terminal",
         "server_signer": null
       },
       "name": "canonicalization_mismatch",
@@ -137,6 +218,8 @@
         "path": "mcps-verified",
         "reason": "mcps.actor_binding_failed",
         "request_hash": null,
+        "response_hash": null,
+        "result_class": "terminal",
         "server_signer": null
       },
       "name": "pinned_signer_mismatch",

@@ -2,12 +2,14 @@
 //! MCP-S-UNAWARE stdio MCP server.
 //!
 //! [`FileServer`] speaks plain MCP JSON-RPC: `initialize`, `tools/list`, and
-//! `tools/call`. It exposes four file tools, all confined to a configured
+//! `tools/call`. It exposes five file tools, all confined to a configured
 //! demo-root directory:
-//!   * `list_files` — **protected**: list a directory's entries.
-//!   * `read_file`  — **protected**: read a UTF-8 text file's contents.
-//!   * `stat`       — **protected**: report a path's type and size.
-//!   * `write_file` — **admin**:     create or overwrite a text file.
+//!   * `list_files`   — **protected**: list a directory's entries.
+//!   * `read_file`    — **protected**: read a UTF-8 text file's contents.
+//!   * `stat`         — **protected**: report a path's type and size.
+//!   * `write_file`   — **admin**:     create or overwrite a text file.
+//!   * `delete_files` — **admin**:     elicits confirmation first (ADR-MCPS-047
+//!     multi-round-trip demo; a SAFE dry-run that never touches the filesystem).
 //!
 //! It knows nothing about MCP-S signing, envelopes, or verified context — that
 //! is the sidecar's job (the proxy wraps this server unchanged). The
@@ -54,6 +56,9 @@ pub const TOOL_READ_FILE: &str = "read_file";
 pub const TOOL_STAT: &str = "stat";
 /// Create or overwrite a text file. Intended scope: `admin`.
 pub const TOOL_WRITE_FILE: &str = "write_file";
+/// Delete files — elicits confirmation first (ADR-MCPS-047 multi-round-trip demo;
+/// a SAFE dry-run that never touches the filesystem). Intended scope: `admin`.
+pub const TOOL_DELETE_FILES: &str = "delete_files";
 
 /// The annotation key under which each tool publishes its intended Phase-5
 /// scope. The server does NOT enforce it; the policy layer reads it.
@@ -177,7 +182,7 @@ impl FileServer {
         })
     }
 
-    /// The `tools/list` result: the four file tools, each tagged with its
+    /// The `tools/list` result: the five file tools, each tagged with its
     /// intended Phase-5 scope.
     fn tools_list_result(&self) -> Value {
         let path_schema = || {
@@ -233,6 +238,24 @@ impl FileServer {
                         "additionalProperties": false,
                     }),
                 ),
+                tool_descriptor(
+                    TOOL_DELETE_FILES,
+                    "Delete files inside the demo root — elicits confirmation first \
+                     (ADR-MCPS-047 multi-round-trip demo; a SAFE dry-run, never deletes).",
+                    SCOPE_ADMIN,
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "paths": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Paths that would be deleted (the demo is a dry-run).",
+                            }
+                        },
+                        "required": ["paths"],
+                        "additionalProperties": false,
+                    }),
+                ),
             ]
         })
     }
@@ -252,7 +275,8 @@ impl FileServer {
         // NOT recorded — it never ran. This is the anti-gaming signal: the log
         // reflects exactly what this inner dispatched.
         match name {
-            TOOL_LIST_FILES | TOOL_READ_FILE | TOOL_STAT | TOOL_WRITE_FILE => {
+            TOOL_LIST_FILES | TOOL_READ_FILE | TOOL_STAT | TOOL_WRITE_FILE
+            | TOOL_DELETE_FILES => {
                 let id = request.get("id").cloned().unwrap_or(Value::Null);
                 self.record_received_call(&id, name);
             }
@@ -265,6 +289,9 @@ impl FileServer {
             TOOL_READ_FILE => self.run_read_file(arguments),
             TOOL_STAT => self.run_stat(arguments),
             TOOL_WRITE_FILE => self.run_write_file(arguments),
+            // delete_files needs the FULL params (the continuation carries
+            // `inputResponses` + echoed `requestState` alongside `arguments`).
+            TOOL_DELETE_FILES => self.run_delete_files(params),
             other => Err(FileServerError::UnknownTool(other.to_string())),
         }
     }
@@ -303,6 +330,50 @@ impl FileServer {
         match self.write_file(path, content) {
             Ok(written) => Ok(write_success(path, written)),
             Err(err) => Ok(tool_error(&err)),
+        }
+    }
+
+    /// `delete_files` (ADR-MCPS-047 multi-round-trip demo): a deterministic, SAFE
+    /// elicitation tool that proves the InputRequiredResult → continuation security
+    /// shape. It NEVER touches the filesystem — `confirmed` merely reflects the
+    /// elicited answer.
+    ///
+    /// This inner server is stateless across the two legs (the proxy may spawn a fresh
+    /// inner per request), so the pending operation MUST travel in the opaque
+    /// `requestState` — the ADR-MCPS-047 / D5 contract. MCP-S never interprets it; only
+    /// this server encodes (first leg) and validates (continuation leg) it.
+    ///
+    /// * First call (no `inputResponses`): return an `InputRequiredResult` asking for
+    ///   confirmation, with the pending `paths` encoded into `requestState`.
+    /// * Continuation call (`inputResponses` + echoed `requestState`): validate that
+    ///   `requestState` decodes and matches the echoed `paths` (D5 server validation),
+    ///   then return a terminal result reporting the (dry-run) deletion.
+    fn run_delete_files(&self, params: &Value) -> Result<Value, FileServerError> {
+        let arguments = params.get("arguments").unwrap_or(&Value::Null);
+        let paths = arguments.get("paths").and_then(Value::as_array).ok_or_else(|| {
+            FileServerError::InvalidParams("delete_files requires an array 'paths' argument".into())
+        })?;
+        if !paths.iter().all(Value::is_string) {
+            return Err(FileServerError::InvalidParams(
+                "delete_files requires 'paths' to be an array of strings".into(),
+            ));
+        }
+
+        match params.get("inputResponses") {
+            // First leg — elicit confirmation; stash the paths in the opaque requestState.
+            None => Ok(delete_files_elicit(paths)),
+            // Continuation leg — validate the echoed requestState, then terminal result.
+            Some(responses) => {
+                let request_state = params
+                    .get("requestState")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        FileServerError::InvalidParams(
+                            "delete_files continuation requires an echoed 'requestState'".into(),
+                        )
+                    })?;
+                Ok(delete_files_terminal(paths, responses, request_state))
+            }
         }
     }
 
@@ -529,6 +600,89 @@ fn stat_success(info: Value) -> Value {
         "structuredContent": info,
         "isError": false,
     })
+}
+
+/// The `delete_files` elicitation leg: an `InputRequiredResult` (SEP-2322) asking
+/// for confirmation, with the pending paths encoded into the opaque `requestState`.
+/// The `resultType: "inputRequired"` discriminator is what a verified client
+/// classifies as non-terminal (ADR-MCPS-047).
+fn delete_files_elicit(paths: &[Value]) -> Value {
+    json!({
+        "resultType": "inputRequired",
+        "inputRequests": {
+            "confirm": {
+                "type": "elicitation",
+                "message": format!("Delete {} file(s)?", paths.len()),
+                "schema": { "type": "boolean" },
+            }
+        },
+        "requestState": encode_request_state(paths),
+    })
+}
+
+/// The `delete_files` continuation leg: validate the echoed `requestState` against
+/// the echoed paths (server-side D5 validation), then return a terminal result. The
+/// demo NEVER deletes anything — `confirmed` reflects the elicited answer, and a
+/// tampered/foreign `requestState` is refused in-band.
+fn delete_files_terminal(paths: &[Value], responses: &Value, request_state: &str) -> Value {
+    match decode_request_state(request_state) {
+        Some(state_paths) if state_paths.as_slice() == paths => {
+            let confirmed = responses
+                .get("confirm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let deleted: Vec<Value> = if confirmed { paths.to_vec() } else { Vec::new() };
+            let summary = if confirmed {
+                format!("deleted {} file(s) (dry-run)", paths.len())
+            } else {
+                "deletion declined".to_string()
+            };
+            json!({
+                "content": [ { "type": "text", "text": summary } ],
+                "structuredContent": { "deleted": deleted, "confirmed": confirmed },
+                "isError": false,
+            })
+        }
+        _ => tool_error(&FileServerError::InvalidParams(
+            "delete_files requestState is invalid or does not match the echoed paths".into(),
+        )),
+    }
+}
+
+/// Encode the pending paths as an opaque `requestState` token: lowercase hex of the
+/// JSON-array bytes. Opaque to MCP-S and the client (echoed verbatim); meaningful
+/// only to this server, which decodes it to resume — the ADR-MCPS-047 / D5 contract.
+/// Hand-rolled hex keeps this MCP-S-unaware server dependency-free.
+fn encode_request_state(paths: &[Value]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let json = Value::Array(paths.to_vec()).to_string();
+    let mut out = String::with_capacity(json.len() * 2);
+    for &b in json.as_bytes() {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Decode a `requestState` token back to the pending paths, or `None` if it is not
+/// valid hex of a JSON array (a tampered/foreign token — refused by the caller).
+fn decode_request_state(state: &str) -> Option<Vec<Value>> {
+    let raw = state.as_bytes();
+    if raw.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(raw.len() / 2);
+    let mut i = 0;
+    while i < raw.len() {
+        let hi = (raw[i] as char).to_digit(16)?;
+        let lo = (raw[i + 1] as char).to_digit(16)?;
+        bytes.push((hi * 16 + lo) as u8);
+        i += 2;
+    }
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::Array(paths)) => Some(paths),
+        _ => None,
+    }
 }
 
 /// An in-band tool error result (MCP `isError: true`); carries no payload.

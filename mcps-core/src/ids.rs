@@ -66,6 +66,20 @@ pub const BINDING_TYPE_OPAQUE_BYTES: &str = "opaque-bytes";
 /// digest + reference, bound (never interpreted) by MCP-S.
 pub const BINDING_TYPE_AUTHZ_SYSTEM_REFERENCE: &str = "authz-system-reference";
 
+/// The `result.resultType` discriminator marking a non-terminal
+/// `InputRequiredResult` response (SEP-2322 elicitation). A response result body
+/// carrying this value is classified [`crate::ResultClass::InputRequired`]; the
+/// client verifies it, retains the correlation entry, and answers with a signed
+/// continuation request (ADR-MCPS-047). Core does not interpret `inputRequests` /
+/// `requestState`.
+pub const RESULT_TYPE_INPUT_REQUIRED: &str = "inputRequired";
+
+/// The only `continuation.type` token in draft-02 — the stateless multi-round-trip
+/// continuation binding (ADR-MCPS-047 / decision D4). Any other value fails closed
+/// as [`crate::McpsError::ContinuationTypeUnsupported`]; future continuation
+/// profiles would mint their own token.
+pub const CONTINUATION_TYPE_MCP_MRT: &str = "mcp-mrt";
+
 /// The only `authorization_binding.digest_alg` token in draft-02 (split form:
 /// explicit algorithm + bare `digest_value`, no `sha256:` prefix —
 /// ADR-MCPS-039). Matches the existing `sha256:` convention's algorithm name.
@@ -100,12 +114,12 @@ pub const OBSERVABILITY_META_KEYS: [&str; 3] = ["traceparent", "tracestate", "ba
 
 #[cfg(test)]
 mod tests {
+    use super::CANONICALIZATION_ID_INT53_V1;
+    use super::DRAFT_02_CANONICALIZATION_ALLOWLIST;
     use super::EXTENSION_ID;
     use super::OBSERVABILITY_META_KEYS;
     use super::REQUEST_META_KEY;
     use super::RESPONSE_META_KEY;
-    use super::CANONICALIZATION_ID_INT53_V1;
-    use super::DRAFT_02_CANONICALIZATION_ALLOWLIST;
     use super::SIG_ALG_ED25519;
     use super::VERIFIED_META_KEY;
     use super::VERSION_DRAFT_01;

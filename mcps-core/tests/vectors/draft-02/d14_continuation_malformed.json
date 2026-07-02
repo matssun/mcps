@@ -1,0 +1,37 @@
+{
+  "id": "req-14",
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "_meta": {
+      "se.syncom/mcps.request": {
+        "audience": "did:example:server-1",
+        "authorization_binding": {
+          "binding_type": "opaque-bytes",
+          "digest_alg": "sha256",
+          "digest_value": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o"
+        },
+        "canonicalization_id": "mcps-jcs-int53-json-v1",
+        "continuation": {
+          "previous_request_hash": "sha256:RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o",
+          "type": "mcp-mrt"
+        },
+        "expires_at": "2026-05-28T20:05:00Z",
+        "issued_at": "2026-05-28T20:00:00Z",
+        "nonce": "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA",
+        "on_behalf_of": "did:example:user-1",
+        "signature": {
+          "alg": "Ed25519",
+          "key_id": "key-1",
+          "value": "PK18DbZttAD4C9Inbw1Xuad8HAwOK5Ai1hyZItOtG-Evq-ftUBl7bGRdQXBLBGIoHNVub1eFQlB5oFqHTXmtAA"
+        },
+        "signer": "did:example:agent-1",
+        "version": "draft-02"
+      }
+    },
+    "arguments": {
+      "text": "hello"
+    },
+    "name": "echo"
+  }
+}

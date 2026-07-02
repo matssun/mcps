@@ -32,9 +32,11 @@ use crate::envelope::Draft02ResponseEnvelope;
 use crate::envelope::RequestEnvelope;
 use crate::envelope::ResponseEnvelope;
 use crate::error::McpsError;
+use crate::hash::parse_hash_id;
 use crate::ids::BINDING_TYPE_AUTHZ_SYSTEM_REFERENCE;
 use crate::ids::BINDING_TYPE_OPAQUE_BYTES;
 use crate::ids::CANONICALIZATION_ID_INT53_V1;
+use crate::ids::CONTINUATION_TYPE_MCP_MRT;
 use crate::ids::DIGEST_ALG_SHA256;
 use crate::ids::DRAFT_02_CANONICALIZATION_ALLOWLIST;
 use crate::ids::REQUEST_META_KEY;
@@ -244,13 +246,12 @@ where
 /// - other structural failure → [`McpsError::CanonicalizationFailed`], with a
 ///   structurally-absent `authorization_hash`/`on_behalf_of` upgraded to its
 ///   dedicated token (same priority as draft-01).
-pub fn extract_draft02_request_envelope(
-    msg: &Value,
-) -> Result<Draft02RequestEnvelope, McpsError> {
+pub fn extract_draft02_request_envelope(msg: &Value) -> Result<Draft02RequestEnvelope, McpsError> {
     let raw = locate_envelope(msg, "params", REQUEST_META_KEY)?;
     require_draft02_version(raw)?;
     check_canonicalization_id(raw)?;
     check_authorization_binding(raw)?;
+    check_continuation(raw)?;
     deserialize_envelope(raw).map_err(|err| classify_draft02_request_envelope_error(raw, err))
 }
 
@@ -335,6 +336,65 @@ fn check_authorization_binding(raw: &Value) -> Result<(), McpsError> {
     // The digest algorithm is an explicit protected field; only sha256 in v0.6.
     if obj.get("digest_alg").and_then(Value::as_str) != Some(DIGEST_ALG_SHA256) {
         return Err(McpsError::AuthorizationBindingMalformed);
+    }
+    Ok(())
+}
+
+/// Validate the raw envelope's optional `continuation` object structurally
+/// (ADR-MCPS-047 / decision D4) — Core BINDS the multi-round-trip linkage, never
+/// interprets it. `continuation` is OPTIONAL: an ordinary (first-round) request
+/// omits it entirely, which is valid and returns `Ok`. When present it must be the
+/// stateless multi-round-trip binding:
+/// - not an object, or `type` not `"mcp-mrt"` → [`McpsError::ContinuationTypeUnsupported`];
+/// - wrong field set, an empty field, or a hash that is not a well-formed
+///   `sha256:<base64url>` identifier → [`McpsError::ContinuationMalformed`].
+///
+/// It checks shape only: it never compares the hashes against the answered
+/// `InputRequiredResult` — that is the policy/server layer's job, since only that
+/// side holds the verified prompt. The exact-field-set check is required because an
+/// internally-tagged serde enum does not enforce `deny_unknown_fields` on its
+/// variant, mirroring [`check_authorization_binding`].
+fn check_continuation(raw: &Value) -> Result<(), McpsError> {
+    let continuation = match raw.get("continuation") {
+        // Absent → ordinary first-round request; nothing to bind.
+        None | Some(Value::Null) => return Ok(()),
+        Some(value) => value,
+    };
+    let obj = continuation
+        .as_object()
+        .ok_or(McpsError::ContinuationTypeUnsupported)?;
+    // An unrecognized (or absent) `type` fails closed as unsupported rather than
+    // being silently downgraded to a bare, unbound request.
+    if obj.get("type").and_then(Value::as_str) != Some(CONTINUATION_TYPE_MCP_MRT) {
+        return Err(McpsError::ContinuationTypeUnsupported);
+    }
+
+    // Exactly the required fields — no fewer (mandatory), no extra (deny mixing /
+    // unknown). Each must be a non-empty string.
+    const REQUIRED: [&str; 3] = [
+        "type",
+        "previous_request_hash",
+        "input_required_response_hash",
+    ];
+    if obj.len() != REQUIRED.len() {
+        return Err(McpsError::ContinuationMalformed);
+    }
+    for key in REQUIRED {
+        match obj.get(key).and_then(Value::as_str) {
+            Some(s) if !s.is_empty() => {}
+            _ => return Err(McpsError::ContinuationMalformed),
+        }
+    }
+
+    // Both bindings are request/response preimage hashes: they must be well-formed
+    // `sha256:<base64url>` identifiers (prefix + 32-byte digest), matching the
+    // response envelope's `request_hash` representation.
+    for key in ["previous_request_hash", "input_required_response_hash"] {
+        let value = obj
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or(McpsError::ContinuationMalformed)?;
+        parse_hash_id(value).map_err(|_| McpsError::ContinuationMalformed)?;
     }
     Ok(())
 }
@@ -796,6 +856,135 @@ mod tests {
     fn numeric_id_passes_notification_check() {
         let msg = json!({"id": 7, "jsonrpc": "2.0", "method": "tools/call"});
         assert_eq!(reject_notification(&msg), Ok(()));
+    }
+
+    // ---- continuation structural validation (ADR-MCPS-047 / D4) --------------
+
+    /// The two hashes must be well-formed `sha256:<b64url>` identifiers; reuse a
+    /// known-good 32-byte digest id from the fixtures above.
+    const VALID_HASH_ID: &str = "sha256:RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o";
+
+    fn valid_continuation() -> Value {
+        json!({
+            "type": "mcp-mrt",
+            "previous_request_hash": VALID_HASH_ID,
+            "input_required_response_hash": VALID_HASH_ID,
+        })
+    }
+
+    #[test]
+    fn draft02_request_without_continuation_is_valid() {
+        // An ordinary first-round request omits `continuation` entirely.
+        let msg = request_message_with_envelope(valid_draft02_request_envelope());
+        assert!(extract_draft02_request_envelope(&msg).is_ok());
+    }
+
+    #[test]
+    fn draft02_request_with_valid_continuation_extracts() {
+        let mut env = valid_draft02_request_envelope();
+        env["continuation"] = valid_continuation();
+        let msg = request_message_with_envelope(env);
+        let e = extract_draft02_request_envelope(&msg).expect("valid continuation");
+        assert_eq!(
+            e.continuation,
+            Some(crate::envelope::Continuation::McpMrt {
+                previous_request_hash: VALID_HASH_ID.to_string(),
+                input_required_response_hash: VALID_HASH_ID.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn continuation_wrong_type_is_type_unsupported() {
+        let mut env = valid_draft02_request_envelope();
+        let mut cont = valid_continuation();
+        cont["type"] = json!("some-future-profile");
+        env["continuation"] = cont;
+        let msg = request_message_with_envelope(env);
+        assert_eq!(
+            extract_draft02_request_envelope(&msg),
+            Err(McpsError::ContinuationTypeUnsupported)
+        );
+    }
+
+    #[test]
+    fn continuation_non_object_is_type_unsupported() {
+        let mut env = valid_draft02_request_envelope();
+        env["continuation"] = json!("mcp-mrt");
+        let msg = request_message_with_envelope(env);
+        assert_eq!(
+            extract_draft02_request_envelope(&msg),
+            Err(McpsError::ContinuationTypeUnsupported)
+        );
+    }
+
+    #[test]
+    fn continuation_missing_hash_field_is_malformed() {
+        let mut env = valid_draft02_request_envelope();
+        let mut cont = valid_continuation();
+        cont.as_object_mut()
+            .unwrap()
+            .remove("input_required_response_hash");
+        env["continuation"] = cont;
+        let msg = request_message_with_envelope(env);
+        assert_eq!(
+            extract_draft02_request_envelope(&msg),
+            Err(McpsError::ContinuationMalformed)
+        );
+    }
+
+    #[test]
+    fn continuation_extra_field_is_malformed() {
+        let mut env = valid_draft02_request_envelope();
+        let mut cont = valid_continuation();
+        cont["extra"] = json!("nope");
+        env["continuation"] = cont;
+        let msg = request_message_with_envelope(env);
+        assert_eq!(
+            extract_draft02_request_envelope(&msg),
+            Err(McpsError::ContinuationMalformed)
+        );
+    }
+
+    #[test]
+    fn continuation_empty_hash_is_malformed() {
+        let mut env = valid_draft02_request_envelope();
+        let mut cont = valid_continuation();
+        cont["previous_request_hash"] = json!("");
+        env["continuation"] = cont;
+        let msg = request_message_with_envelope(env);
+        assert_eq!(
+            extract_draft02_request_envelope(&msg),
+            Err(McpsError::ContinuationMalformed)
+        );
+    }
+
+    #[test]
+    fn continuation_non_sha256_hash_is_malformed() {
+        let mut env = valid_draft02_request_envelope();
+        let mut cont = valid_continuation();
+        // A bare base64url body without the `sha256:` prefix is not a hash id.
+        cont["input_required_response_hash"] = json!("RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o");
+        env["continuation"] = cont;
+        let msg = request_message_with_envelope(env);
+        assert_eq!(
+            extract_draft02_request_envelope(&msg),
+            Err(McpsError::ContinuationMalformed)
+        );
+    }
+
+    #[test]
+    fn continuation_wrong_length_hash_is_malformed() {
+        let mut env = valid_draft02_request_envelope();
+        let mut cont = valid_continuation();
+        // Correct prefix, but the digest decodes to fewer than 32 bytes.
+        cont["previous_request_hash"] = json!("sha256:AAAA");
+        env["continuation"] = cont;
+        let msg = request_message_with_envelope(env);
+        assert_eq!(
+            extract_draft02_request_envelope(&msg),
+            Err(McpsError::ContinuationMalformed)
+        );
     }
 
     // ---- extract_request_envelope --------------------------------------------

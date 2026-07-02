@@ -94,10 +94,7 @@ impl EnvelopeLocation {
 /// for both signing and verification (one shared function), so a middle box that
 /// mutates only a trace field cannot break the signature. Missing envelope or
 /// signature block → [`McpsError::MissingEnvelope`].
-pub fn signing_preimage(
-    object: &Value,
-    location: EnvelopeLocation,
-) -> Result<Vec<u8>, McpsError> {
+pub fn signing_preimage(object: &Value, location: EnvelopeLocation) -> Result<Vec<u8>, McpsError> {
     let mut cloned = object.clone();
     strip_signature_value(&mut cloned, location)?;
     strip_observability_meta(&mut cloned, location);
@@ -142,7 +139,11 @@ pub fn preimage_exclusion_paths(location: EnvelopeLocation) -> Vec<Vec<String>> 
     ]);
     // (2) container-level W3C trace keys only.
     for key in OBSERVABILITY_META_KEYS {
-        paths.push(vec![container.clone(), "_meta".to_string(), key.to_string()]);
+        paths.push(vec![
+            container.clone(),
+            "_meta".to_string(),
+            key.to_string(),
+        ]);
     }
     paths
 }
@@ -154,13 +155,21 @@ pub fn request_hash(request_object: &Value) -> Result<String, McpsError> {
     Ok(sha256_hash_id(&preimage))
 }
 
+/// `response_hash`: SHA-256 of the RESPONSE signing preimage, formatted
+/// `sha256:<b64url-no-pad>`. This is the `input_required_response_hash` a client
+/// binds into its continuation request (ADR-MCPS-047 / D4): it commits to the EXACT
+/// signed `InputRequiredResult` preimage the client verified before continuing.
+/// Because the preimage excludes only `signature.value` + trace keys, the hash is
+/// stable across signing and verification, exactly like [`request_hash`].
+pub fn response_hash(response_object: &Value) -> Result<String, McpsError> {
+    let preimage = response_signing_preimage(response_object)?;
+    Ok(sha256_hash_id(&preimage))
+}
+
 /// Remove `signature.value` from the envelope at `location`, in place. Returns
 /// [`McpsError::MissingEnvelope`] if the container, `_meta`, the envelope, or its
 /// `signature` block is absent.
-fn strip_signature_value(
-    object: &mut Value,
-    location: EnvelopeLocation,
-) -> Result<(), McpsError> {
+fn strip_signature_value(object: &mut Value, location: EnvelopeLocation) -> Result<(), McpsError> {
     let container = object
         .get_mut(location.container_key())
         .ok_or(McpsError::MissingEnvelope)?;
@@ -284,9 +293,15 @@ mod tests {
     fn preimage_excludes_value_but_keeps_alg_and_key_id() {
         let preimage = request_signing_preimage(&request_object()).expect("preimage");
         let text = String::from_utf8(preimage).expect("utf8");
-        assert!(!text.contains("c2lnbmF0dXJl"), "signature value must be removed");
+        assert!(
+            !text.contains("c2lnbmF0dXJl"),
+            "signature value must be removed"
+        );
         assert!(text.contains("\"alg\":\"Ed25519\""), "alg must be retained");
-        assert!(text.contains("\"key_id\":\"key-1\""), "key_id must be retained");
+        assert!(
+            text.contains("\"key_id\":\"key-1\""),
+            "key_id must be retained"
+        );
     }
 
     #[test]
@@ -307,7 +322,10 @@ mod tests {
     fn response_preimage_targets_result_meta() {
         let preimage = response_signing_preimage(&response_object()).expect("preimage");
         let text = String::from_utf8(preimage).expect("utf8");
-        assert!(!text.contains("cmVzcG9uc2VzaWc"), "response sig value removed");
+        assert!(
+            !text.contains("cmVzcG9uc2VzaWc"),
+            "response sig value removed"
+        );
         assert!(text.contains("server_signer"));
     }
 
@@ -357,8 +375,8 @@ mod tests {
         // must NOT change the request_hash.
         let baseline = request_hash(&request_object()).expect("hash");
         let mut other_value = request_object();
-        other_value["params"]["_meta"]["se.syncom/mcps.request"]["signature"]
-            ["value"] = Value::String("ZGlmZmVyZW50".to_string());
+        other_value["params"]["_meta"]["se.syncom/mcps.request"]["signature"]["value"] =
+            Value::String("ZGlmZmVyZW50".to_string());
         assert_eq!(baseline, request_hash(&other_value).expect("hash"));
     }
 
@@ -481,7 +499,10 @@ mod tests {
             .as_object_mut()
             .unwrap();
         env.insert("version".into(), json!("draft-02"));
-        env.insert("canonicalization_id".into(), json!("mcps-jcs-int53-json-v1"));
+        env.insert(
+            "canonicalization_id".into(),
+            json!("mcps-jcs-int53-json-v1"),
+        );
         // container-level trace key — EXCLUDED by the predicate.
         obj["params"]["_meta"]
             .as_object_mut()
@@ -608,9 +629,21 @@ mod tests {
                     "signature".to_string(),
                     "value".to_string()
                 ],
-                vec!["params".to_string(), "_meta".to_string(), "traceparent".to_string()],
-                vec!["params".to_string(), "_meta".to_string(), "tracestate".to_string()],
-                vec!["params".to_string(), "_meta".to_string(), "baggage".to_string()],
+                vec![
+                    "params".to_string(),
+                    "_meta".to_string(),
+                    "traceparent".to_string()
+                ],
+                vec![
+                    "params".to_string(),
+                    "_meta".to_string(),
+                    "tracestate".to_string()
+                ],
+                vec![
+                    "params".to_string(),
+                    "_meta".to_string(),
+                    "baggage".to_string()
+                ],
             ]
         );
         let resp = preimage_exclusion_paths(EnvelopeLocation::Response);

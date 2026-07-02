@@ -101,6 +101,7 @@ def verify_inbound_messages(
     correlation: Any,
     *,
     now_unix: int,
+    mrt: Any = None,
 ) -> List[InboundOutcome]:
     """Decode an inbound body (any of the three sites) and verify EVERY message.
 
@@ -108,6 +109,8 @@ def verify_inbound_messages(
     :func:`~mcps_sdk.transport.verify_inbound`, so a correlated response is
     ``request_hash``-verified and a server-initiated message is subjected to the
     fail-closed inbound policy — uniformly, whichever decode site the body came from.
+    ``mrt`` (optional) threads the ADR-MCPS-047 multi-round-trip state so a verified
+    ``InputRequiredResult`` decoded here is recorded for the continuation answer leg.
 
     Resilient by design: a body that cannot even be decoded (e.g. non-UTF-8 SSE
     bytes) fails closed as a single ``missing_envelope`` reject rather than crashing
@@ -124,7 +127,9 @@ def verify_inbound_messages(
         if not payload:
             continue
         try:
-            outcomes.append(verify_inbound(payload, config, correlation, now_unix=now_unix))
+            outcomes.append(
+                verify_inbound(payload, config, correlation, now_unix=now_unix, mrt=mrt)
+            )
         except ValueError:
             outcomes.append(InboundOutcome("reject", reason="mcps.missing_envelope"))
     return outcomes

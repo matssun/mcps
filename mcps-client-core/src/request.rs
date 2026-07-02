@@ -27,6 +27,7 @@
 use mcps_core::request_hash;
 use mcps_core::request_signing_preimage;
 use mcps_core::AuthorizationBinding;
+use mcps_core::Continuation;
 use mcps_core::McpsError;
 use mcps_core::SigningKey;
 use mcps_core::DRAFT_02_CANONICALIZATION_ALLOWLIST;
@@ -68,6 +69,13 @@ pub struct RequestSigningInputs {
     pub expires_at: String,
     /// Protected canonicalization-scheme id; must be in the draft-02 allowlist.
     pub canonicalization_id: String,
+    /// Optional multi-round-trip continuation binding (ADR-MCPS-047 / D4). `None`
+    /// for an ordinary first-round request (the key is omitted from the envelope,
+    /// keeping the wire byte-identical to pre-047 requests). `Some(..)` on a
+    /// continuation request answering a verified `InputRequiredResult`: it is bound
+    /// INSIDE the signed preimage, so the round-trip linkage is cryptographic
+    /// evidence. Set it via [`RequestSigningInputs::with_continuation`].
+    pub continuation: Option<Continuation>,
 }
 
 impl RequestSigningInputs {
@@ -96,7 +104,18 @@ impl RequestSigningInputs {
             issued_at: issued_at.into(),
             expires_at: expires_at.into(),
             canonicalization_id: DRAFT_02_CANONICALIZATION_ALLOWLIST[0].to_string(),
+            continuation: None,
         }
+    }
+
+    /// Bind this request to the verified `InputRequiredResult` it answers
+    /// (ADR-MCPS-047 / D4). Builder-style; the continuation object is authored
+    /// inside the signed preimage. Use [`mcps_core::build_mcp_mrt_continuation`] to
+    /// construct the binding from the two hashes the client holds after verifying
+    /// the `InputRequiredResult`.
+    pub fn with_continuation(mut self, continuation: Continuation) -> Self {
+        self.continuation = Some(continuation);
+        self
     }
 }
 
@@ -209,7 +228,7 @@ pub(crate) fn build_signed_request_with(
     // protected `version` and `canonicalization_id` are the first two members so
     // they are clearly part of the signed evidence; JCS reorders them canonically
     // regardless.
-    let envelope = json!({
+    let mut envelope = json!({
         "version": VERSION_DRAFT_02,
         "canonicalization_id": inputs.canonicalization_id,
         "signer": inputs.signer,
@@ -221,6 +240,19 @@ pub(crate) fn build_signed_request_with(
         "expires_at": inputs.expires_at,
         "signature": { "alg": SIG_ALG_ED25519, "key_id": inputs.key_id },
     });
+
+    // Optional continuation binding (ADR-MCPS-047 / D4): present ONLY on a
+    // continuation request. Omitting the key keeps first-round requests
+    // byte-identical to pre-047 evidence; when present it is inside the preimage
+    // and therefore signed. `serde_json::to_value` on the typed enum cannot fail.
+    if let Some(continuation) = &inputs.continuation {
+        let value =
+            serde_json::to_value(continuation).map_err(|_| McpsError::CanonicalizationFailed)?;
+        envelope
+            .as_object_mut()
+            .expect("envelope is a JSON object")
+            .insert("continuation".to_string(), value);
+    }
 
     // Merge the envelope into params._meta, overwriting any caller-supplied copy.
     let mut params = params;

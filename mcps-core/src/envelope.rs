@@ -150,6 +150,34 @@ pub enum AuthorizationBinding {
     },
 }
 
+/// Multi-round-trip continuation binding (ADR-MCPS-047 / decision D4).
+///
+/// Present ONLY on a continuation request — the fresh signed client request that
+/// answers a verified `InputRequiredResult`. Ordinary first-round requests omit
+/// it entirely. It cryptographically ties the continuation to the exact signed
+/// `InputRequiredResult` it answers, so a continuation cannot be detached from the
+/// prompt it responds to; missing/malformed/mismatched fails closed.
+///
+/// Like [`AuthorizationBinding`] it is internally tagged (`#[serde(tag = "type")]`)
+/// and Core validates STRUCTURE only — it BINDS, never interprets. Unlike the
+/// authz digests (split `digest_alg`/bare `digest_value`), the two hashes here use
+/// the combined `"sha256:<b64url-no-pad>"` form, matching the response envelope's
+/// `request_hash`, because they ARE request/response preimage hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Continuation {
+    /// Stateless MCP multi-round-trip continuation (SEP-2260/2322 elicitation).
+    #[serde(rename = "mcp-mrt")]
+    McpMrt {
+        /// `request_hash` of the client request that produced the
+        /// `InputRequiredResult` being answered. Combined `"sha256:<b64url>"` form.
+        previous_request_hash: String,
+        /// Hash of the signed `InputRequiredResult` response preimage the client
+        /// verified before continuing. Combined `"sha256:<b64url>"` form.
+        input_required_response_hash: String,
+    },
+}
+
 /// The draft-02 request envelope (value under the request `_meta` key).
 ///
 /// Mirrors [`RequestEnvelope`] plus the two protected draft-02 identifiers, with
@@ -177,6 +205,14 @@ pub struct Draft02RequestEnvelope {
     /// `authorization_hash`). Core validates structure only; the policy profile
     /// reproduces/compares or hands a reference off — never interpreted in Core.
     pub authorization_binding: AuthorizationBinding,
+    /// Multi-round-trip continuation binding (ADR-MCPS-047 / D4). Present ONLY on a
+    /// continuation request answering a verified `InputRequiredResult`; ordinary
+    /// requests omit it (`skip_serializing_if` keeps existing wire byte-identical).
+    /// When present it is INSIDE the signed preimage (not an exclusion path), so
+    /// the round-trip linkage is cryptographic evidence. Core validates structure
+    /// only; the policy/server layer checks the hashes against the verified prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Continuation>,
     /// Opaque anti-replay nonce (>= 128 bits entropy).
     pub nonce: String,
     /// Issue time, RFC 3339 UTC.
@@ -294,8 +330,7 @@ mod tests {
         assert_eq!(parsed.signature.value.as_deref(), Some("c2lnbmF0dXJl"));
 
         let serialized = serde_json::to_string(&parsed).expect("serialize");
-        let reparsed: RequestEnvelope =
-            serde_json::from_str(&serialized).expect("reparse");
+        let reparsed: RequestEnvelope = serde_json::from_str(&serialized).expect("reparse");
         assert_eq!(parsed, reparsed);
     }
 
@@ -307,8 +342,7 @@ mod tests {
         assert_eq!(parsed.server_signer, "did:example:server");
 
         let serialized = serde_json::to_string(&parsed).expect("serialize");
-        let reparsed: ResponseEnvelope =
-            serde_json::from_str(&serialized).expect("reparse");
+        let reparsed: ResponseEnvelope = serde_json::from_str(&serialized).expect("reparse");
         assert_eq!(parsed, reparsed);
     }
 
@@ -320,8 +354,7 @@ mod tests {
         assert_eq!(parsed.request_hash, "sha256:BBBB");
 
         let serialized = serde_json::to_string(&parsed).expect("serialize");
-        let reparsed: VerifiedContext =
-            serde_json::from_str(&serialized).expect("reparse");
+        let reparsed: VerifiedContext = serde_json::from_str(&serialized).expect("reparse");
         assert_eq!(parsed, reparsed);
     }
 
@@ -332,7 +365,10 @@ mod tests {
             "\"version\": \"draft-01\",\n        \"bogus\": true,",
         );
         let result: Result<RequestEnvelope, _> = serde_json::from_str(&bogus);
-        assert!(result.is_err(), "unknown field must be rejected (fail closed)");
+        assert!(
+            result.is_err(),
+            "unknown field must be rejected (fail closed)"
+        );
     }
 
     #[test]
@@ -409,7 +445,10 @@ mod tests {
             "\"signer\": \"did:example:host\",\n        \"authorization_hash\": \"sha256:AAAA\",",
         );
         let result: Result<super::Draft02RequestEnvelope, _> = serde_json::from_str(&bogus);
-        assert!(result.is_err(), "authorization_hash must be rejected in draft-02");
+        assert!(
+            result.is_err(),
+            "authorization_hash must be rejected in draft-02"
+        );
     }
 
     #[test]
@@ -430,8 +469,7 @@ mod tests {
             let json = serde_json::to_string(&binding).expect("serialize");
             // The discriminator is the wire field `binding_type`.
             assert!(json.contains("\"binding_type\""));
-            let reparsed: AuthorizationBinding =
-                serde_json::from_str(&json).expect("reparse");
+            let reparsed: AuthorizationBinding = serde_json::from_str(&json).expect("reparse");
             assert_eq!(binding, reparsed);
         }
     }
@@ -440,8 +478,8 @@ mod tests {
     fn draft02_response_envelope_carries_both_protected_identifiers() {
         // The draft-01 response carries NEITHER identifier; draft-02 gains both so
         // a stored response is self-describing standalone (decision B.2).
-        let parsed: super::Draft02ResponseEnvelope =
-            serde_json::from_str(DRAFT02_RESPONSE_JSON).expect("draft-02 response must deserialize");
+        let parsed: super::Draft02ResponseEnvelope = serde_json::from_str(DRAFT02_RESPONSE_JSON)
+            .expect("draft-02 response must deserialize");
         assert_eq!(parsed.version, "draft-02");
         assert_eq!(parsed.canonicalization_id, "mcps-jcs-int53-json-v1");
         assert_eq!(parsed.request_hash, "sha256:BBBB");
@@ -459,7 +497,10 @@ mod tests {
             "\"version\": \"draft-02\",\n        \"bogus\": true,",
         );
         let result: Result<super::Draft02RequestEnvelope, _> = serde_json::from_str(&bogus);
-        assert!(result.is_err(), "unknown field must be rejected (fail closed)");
+        assert!(
+            result.is_err(),
+            "unknown field must be rejected (fail closed)"
+        );
     }
 
     #[test]
@@ -467,10 +508,15 @@ mod tests {
         // A draft-02 envelope lacking the protected canonicalization_id is
         // structurally invalid (the pipeline maps this to
         // mcps.canonicalization_id_missing).
-        let missing = DRAFT02_REQUEST_JSON
-            .replace("\"canonicalization_id\": \"mcps-jcs-int53-json-v1\",\n        ", "");
+        let missing = DRAFT02_REQUEST_JSON.replace(
+            "\"canonicalization_id\": \"mcps-jcs-int53-json-v1\",\n        ",
+            "",
+        );
         let result: Result<super::Draft02RequestEnvelope, _> = serde_json::from_str(&missing);
-        assert!(result.is_err(), "missing canonicalization_id must fail closed");
+        assert!(
+            result.is_err(),
+            "missing canonicalization_id must fail closed"
+        );
     }
 
     #[test]
@@ -498,16 +544,14 @@ mod tests {
         };
         let serialized = serde_json::to_string(&wire).expect("serialize");
         assert!(serialized.contains("\"value\":\"c2ln\""));
-        let reparsed: SignatureBlock =
-            serde_json::from_str(&serialized).expect("reparse");
+        let reparsed: SignatureBlock = serde_json::from_str(&serialized).expect("reparse");
         assert_eq!(wire, reparsed);
     }
 
     #[test]
     fn signature_block_deserializes_without_value_key() {
         let no_value = r#"{"alg":"Ed25519","key_id":"key-1"}"#;
-        let parsed: SignatureBlock =
-            serde_json::from_str(no_value).expect("missing value -> None");
+        let parsed: SignatureBlock = serde_json::from_str(no_value).expect("missing value -> None");
         assert_eq!(parsed.value, None);
     }
 }

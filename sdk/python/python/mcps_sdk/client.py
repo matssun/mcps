@@ -84,40 +84,26 @@ async def connect_stdio(
             await process.wait()
 
 
-@asynccontextmanager
-async def connect_mtls_http(
+def make_mtls_post_sync(
     host: str,
     port: int,
-    config: McpsConfig,
     *,
     server_ca: str,
     client_cert: str,
     client_key: str,
     server_name: str,
     timeout: float = 15.0,
-    correlation: Any = None,
-    clock=None,
-    nonce_factory=None,
 ):
-    """Yield an ``mcp.ClientSession`` whose every request is one MCP-S-signed mTLS
-    POST to the production ``mcps-proxy`` (verified server-signed response).
+    """Build a synchronous ``body -> (content_type, response_body)`` mTLS POST — one
+    HTTP/1.1 POST per connection (``Connection: close``), the ``mcps-proxy`` wire.
 
-    This is the request/response counterpart to :func:`connect_stdio`: the proxy
-    serves one HTTP/1.1 POST per mTLS connection (``Connection: close``), so each
-    ``ClientSession`` request opens its own connection. ``initialize`` round-trips
-    as a normal signed request; client→server notifications are dropped (the
-    transport has no fire-and-forget channel and the minimal proxy never pushes).
-
-    The client authenticates with ``client_cert`` / ``client_key`` (the cert's URI
-    SAN is the MCP-S signer DID) and verifies the proxy's server certificate against
-    ``server_ca`` for ``server_name``.
+    Shared by :func:`connect_mtls_http` and the live session tests so both drive the
+    SAME socket path. The client authenticates with ``client_cert`` / ``client_key``
+    (the cert's URI SAN is the MCP-S signer DID) and verifies the proxy's server
+    certificate against ``server_ca`` for ``server_name``.
     """
     import socket
     import ssl
-
-    from mcp import ClientSession  # lazy: keeps `import mcps_sdk` mcp-free
-
-    from .http_transport import McpsHttpTransport
 
     ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=server_ca)
     ctx.load_cert_chain(client_cert, client_key)
@@ -155,6 +141,50 @@ async def connect_mtls_http(
                 break
         return content_type, resp_body
 
+    return post_sync
+
+
+@asynccontextmanager
+async def connect_mtls_http(
+    host: str,
+    port: int,
+    config: McpsConfig,
+    *,
+    server_ca: str,
+    client_cert: str,
+    client_key: str,
+    server_name: str,
+    timeout: float = 15.0,
+    correlation: Any = None,
+    clock=None,
+    nonce_factory=None,
+):
+    """Yield an ``mcp.ClientSession`` whose every request is one MCP-S-signed mTLS
+    POST to the production ``mcps-proxy`` (verified server-signed response).
+
+    This is the request/response counterpart to :func:`connect_stdio`: the proxy
+    serves one HTTP/1.1 POST per mTLS connection (``Connection: close``), so each
+    ``ClientSession`` request opens its own connection. ``initialize`` round-trips
+    as a normal signed request; client→server notifications are dropped (the
+    transport has no fire-and-forget channel and the minimal proxy never pushes).
+
+    The client authenticates with ``client_cert`` / ``client_key`` (the cert's URI
+    SAN is the MCP-S signer DID) and verifies the proxy's server certificate against
+    ``server_ca`` for ``server_name``.
+    """
+    from mcp import ClientSession  # lazy: keeps `import mcps_sdk` mcp-free
+
+    from .http_transport import McpsHttpTransport
+
+    post_sync = make_mtls_post_sync(
+        host,
+        port,
+        server_ca=server_ca,
+        client_cert=client_cert,
+        client_key=client_key,
+        server_name=server_name,
+        timeout=timeout,
+    )
     transport = McpsHttpTransport(
         post_sync, config, correlation, clock=clock, nonce_factory=nonce_factory
     )

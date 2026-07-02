@@ -1,0 +1,12 @@
+# Rust build output
+target/
+
+# napi-rs native artifacts (rebuilt by `napi build`; the .node is platform-specific)
+native/*.node
+
+# TypeScript build output
+dist/
+
+# Node
+node_modules/
+npm-debug.log*

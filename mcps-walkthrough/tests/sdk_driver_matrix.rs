@@ -20,6 +20,7 @@
 
 use mcps_walkthrough::structured;
 use mcps_walkthrough::tool_call;
+use mcps_walkthrough::tool_call_continuation;
 use mcps_walkthrough::ClientDriver;
 use mcps_walkthrough::FourHop;
 use mcps_walkthrough::FourHopOptions;
@@ -121,6 +122,109 @@ fn every_configured_sdk_driver_fails_closed_on_an_untrusted_server() {
         assert!(
             !response.to_string().contains(SEED_TEXT.trim()),
             "driver '{}' must not leak inner file content on fail-closed: {response}",
+            driver.label
+        );
+    }
+}
+
+/// The ADR-MCPS-047 multi-round-trip (elicitation → continuation) SECURITY SHAPE,
+/// driver-agnostic. This is NOT a test of MCP elicitation semantics — it proves the
+/// one new MCP-S evidence class end to end through EVERY interchangeable client leg:
+///
+/// ```text
+/// signed request
+///   -> signed InputRequiredResult (bound to the first request_hash)
+///   -> driver records the continuation state
+///   -> signed continuation request (carries the continuation binding)
+///   -> signed terminal response (bound to the CONTINUATION request_hash)
+/// ```
+///
+/// If any leg's evidence failed — an unsigned/misbound InputRequiredResult, a missing
+/// or malformed continuation binding, a terminal bound to the wrong request_hash — the
+/// driver would fail closed and the round trip could not complete. Completion across
+/// the Rust reference + every configured SDK driver is therefore the proof.
+#[test]
+fn every_configured_sdk_driver_completes_an_mrt_continuation() {
+    let drivers = ClientDriver::available();
+
+    for (label, key) in [
+        ("python", "MCPS_DRIVER_PYTHON"),
+        ("typescript", "MCPS_DRIVER_TS"),
+    ] {
+        if std::env::var_os(key).is_none() {
+            eprintln!("[driver-matrix] SKIP mrt {label}: {key} not set");
+        }
+    }
+
+    for driver in &drivers {
+        eprintln!("[driver-matrix] MRT {} ({:?})", driver.label, driver.command);
+        let mut hop = FourHop::launch_with(FourHopOptions {
+            client_driver: Some(driver.clone()),
+            ..FourHopOptions::default()
+        });
+
+        let paths = serde_json::json!(["a.txt", "b.txt"]);
+
+        // Leg 1 — the ordinary client sends a plain `delete_files` call. The inner
+        // returns an InputRequiredResult; the server signs it (bound to the request
+        // hash) and the driver verifies + classifies it non-terminal, delivering the
+        // elicitation as plain MCP with NO MCP-S envelope leaked.
+        let elicit = hop.call(&tool_call(
+            &format!("mrt1-{}", driver.label),
+            "delete_files",
+            serde_json::json!({ "paths": paths.clone() }),
+        ));
+        assert_eq!(
+            elicit["result"]["resultType"], "inputRequired",
+            "driver '{}' must surface the signed InputRequiredResult: {elicit}",
+            driver.label
+        );
+        assert!(
+            elicit["result"]["_meta"].is_null(),
+            "driver '{}' leaked an MCP-S envelope on the elicitation: {elicit}",
+            driver.label
+        );
+        let request_state = elicit["result"]["requestState"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!(
+                    "driver '{}' elicitation carried no requestState to echo: {elicit}",
+                    driver.label
+                )
+            })
+            .to_string();
+
+        // Leg 2 — the client answers. The driver looks up the recorded continuation
+        // binding by `requestState` and signs a continuation request carrying it; the
+        // server verifies the continuation (its binding rides inside the signed
+        // preimage) and the inner returns the terminal result, bound to the
+        // CONTINUATION request hash. The plain client sees a clean terminal result.
+        let terminal = hop.call(&tool_call_continuation(
+            &format!("mrt2-{}", driver.label),
+            "delete_files",
+            serde_json::json!({ "paths": paths.clone() }),
+            serde_json::json!({ "confirm": true }),
+            &request_state,
+        ));
+        assert!(
+            terminal.get("error").is_none(),
+            "driver '{}' continuation must complete, got error: {terminal}",
+            driver.label
+        );
+        let structured_content = structured(&terminal);
+        assert_eq!(
+            structured_content["confirmed"], true,
+            "driver '{}' terminal must confirm the deletion: {terminal}",
+            driver.label
+        );
+        assert_eq!(
+            structured_content["deleted"], paths,
+            "driver '{}' terminal must report the echoed paths",
+            driver.label
+        );
+        assert!(
+            terminal["result"]["_meta"].is_null(),
+            "driver '{}' leaked an MCP-S envelope on the terminal: {terminal}",
             driver.label
         );
     }

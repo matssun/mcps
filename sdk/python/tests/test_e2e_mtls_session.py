@@ -25,6 +25,7 @@ built binaries + cargo (skips cleanly otherwise):
     cargo build -p mcps-proxy && cargo build -p mcps-demo-fileserver
 """
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -39,6 +40,8 @@ import mcps_sdk
 anyio = pytest.importorskip("anyio")
 pytest.importorskip("mcp")
 from mcp.shared.exceptions import McpError  # noqa: E402
+from mcp.shared.message import SessionMessage  # noqa: E402
+from mcp.types import JSONRPCMessage  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 PROXY = ROOT / "target" / "debug" / "mcps-proxy"
@@ -157,6 +160,69 @@ def test_clientsession_initialize_and_call_over_mtls(proxy):
                 assert init.protocolVersion == "2025-06-18"
                 result = await session.call_tool("read_file", {"path": "greeting.txt"})
                 assert result.content[0].text == FILE_TEXT
+
+    anyio.run(run)
+
+
+def _sm(rid, method, params):
+    raw = json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+    return SessionMessage(JSONRPCMessage.model_validate_json(raw))
+
+
+def test_http_transport_drives_delete_files_continuation_over_mtls(proxy):
+    """ADR-047 continuation END TO END over real mTLS: `delete_files` elicits an
+    InputRequiredResult, then the client answers it. The real `mcps-proxy` signs BOTH
+    responses over the actual runtime request hashes, so this exercises
+    `McpsHttpTransport`'s own MRT threading — `self._mrt` recorded on the elicit leg,
+    bound on the answer leg — against the production PEP (not a fixture stand-in).
+
+    Driven at the transport level (not through `ClientSession`) because the elicitation
+    arrives as an InputRequiredResult *result*, which a `ClientSession` delivers but
+    cannot itself continue — the application (here, the test) supplies the answer leg,
+    exactly as the four-hop driver does. `initialize` is skipped: the proxy + stateless
+    fileserver dispatch `tools/call` directly, as the conformance matrix proves."""
+
+    async def run():
+        config = _config(_trusting_resolver(), expected_server_signer=SERVER)
+        post = mcps_sdk.make_mtls_post_sync(
+            "127.0.0.1", proxy["port"],
+            server_ca=f"{proxy['out']}/server_ca.pem",
+            client_cert=f"{proxy['out']}/client_cert.pem",
+            client_key=f"{proxy['out']}/client_key.pem",
+            server_name=SERVER_NAME,
+        )
+        transport = mcps_sdk.McpsHttpTransport(post, config)
+        with anyio.fail_after(30):
+            async with transport as (read_stream, write_stream):
+                # Leg 1 — elicit: no inputResponses, so the server returns an
+                # InputRequiredResult and the transport records its MRT binding.
+                await write_stream.send(
+                    _sm("del-1", "tools/call",
+                        {"name": "delete_files", "arguments": {"paths": ["greeting.txt"]}})
+                )
+                elicit = await read_stream.receive()
+                em = json.loads(elicit.message.model_dump_json(by_alias=True, exclude_none=True))
+                assert em["result"]["resultType"] == "inputRequired"
+                assert "_meta" not in em["result"], "the MCP-S envelope must be stripped"
+                state = em["result"]["requestState"]
+
+                # Leg 2 — answer: inputResponses + the echoed requestState. The transport
+                # must bind the recorded continuation; the proxy verifies and the
+                # fileserver returns the terminal result.
+                await write_stream.send(
+                    _sm("del-2", "tools/call", {
+                        "name": "delete_files",
+                        "arguments": {"paths": ["greeting.txt"]},
+                        "inputResponses": {"confirm": True},
+                        "requestState": state,
+                    })
+                )
+                terminal = await read_stream.receive()
+                tm = json.loads(terminal.message.model_dump_json(by_alias=True, exclude_none=True))
+                assert tm["result"]["isError"] is False
+                assert tm["result"]["structuredContent"] == {
+                    "deleted": ["greeting.txt"], "confirmed": True,
+                }
 
     anyio.run(run)
 

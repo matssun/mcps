@@ -47,6 +47,7 @@ __all__ = [
     "connect",
     "connect_stdio",
     "connect_mtls_http",
+    "make_mtls_post_sync",
     "decode_inbound",
     "sse_data_events",
     "verify_inbound_messages",
@@ -99,7 +100,12 @@ from .authorization import (  # noqa: E402
     OpaqueBytesProvider,
     StaticAuthorizationProvider,
 )
-from .client import connect, connect_mtls_http, connect_stdio  # noqa: E402
+from .client import (  # noqa: E402
+    connect,
+    connect_mtls_http,
+    connect_stdio,
+    make_mtls_post_sync,
+)
 
 #: Response-envelope key the adapter strips before handing a plain response to the app.
 response_meta_key = _core.response_meta_key

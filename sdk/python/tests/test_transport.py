@@ -162,6 +162,21 @@ def test_verify_inbound_passes_through_server_initiated_when_allowed():
     assert out.message.message.root.method == "notifications/message"
 
 
+def test_verify_inbound_passes_through_server_request_when_allowed():
+    """The fourth cell of the server-initiated matrix: an id-bearing server REQUEST
+    under the explicit degraded opt-in is delivered unverified (audited no-evidence),
+    keeping its id + method so a session could respond. Strict require_mcps still
+    rejects it (test_verify_inbound_rejects_server_request_by_default)."""
+    req = json.dumps(
+        {"jsonrpc": "2.0", "id": "s-7", "method": "sampling/createMessage", "params": {"m": 1}}
+    ).encode()
+    config = _config(allow_unverified_server_initiated=True)
+    out = verify_inbound(req, config, mcps_sdk.CorrelationStore(), now_unix=NOW)
+    assert out.kind == "passthrough"
+    assert out.message.message.root.method == "sampling/createMessage"
+    assert str(out.message.message.root.id) == "s-7"
+
+
 # --- async pump wiring (anyio.run, no subprocess) --------------------------
 
 def test_transport_writer_pump_signs_to_wire():

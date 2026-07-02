@@ -161,6 +161,16 @@ def _build_signer(args: argparse.Namespace):
     return signer, policy
 
 
+def _continuation_state(params) -> "str | None":
+    """If ``params`` is a continuation answer (carries ``inputResponses`` AND an
+    echoed ``requestState``, SEP-2322), return the ``requestState`` handle; else None.
+    The handle keys the recorded multi-round-trip binding (ADR-MCPS-047)."""
+    if isinstance(params, dict) and "inputResponses" in params and "requestState" in params:
+        state = params["requestState"]
+        return state if isinstance(state, str) else None
+    return None
+
+
 def _strip_envelope(obj: dict) -> dict:
     """Remove the MCP-S response envelope from ``result._meta`` so the harness sees
     plain MCP (and no ``_meta`` at all when the envelope was its only key)."""
@@ -249,6 +259,13 @@ def main(argv: list[str] | None = None) -> int:
         out.write("\n")
         out.flush()
 
+    # ADR-MCPS-047 multi-round-trip state: the opaque server ``requestState`` handle ->
+    # the verified continuation binding ``(previous_request_hash,
+    # input_required_response_hash)``. Populated when an ``InputRequiredResult`` is
+    # verified; consumed (single-use) when the client answers it. Persists across the
+    # line loop (one long-lived driver process per session).
+    mrt: dict = {}
+
     # readline() (NOT `for line in sys.stdin`): iterating the stream read-aheads and
     # would deadlock this one-request-then-await-response protocol.
     while True:
@@ -268,6 +285,22 @@ def main(argv: list[str] | None = None) -> int:
             continue
         params = request.get("params", {})
 
+        # ADR-MCPS-047 answer leg: a call carrying ``inputResponses`` + an echoed
+        # ``requestState`` is a continuation. Bind it to the verified
+        # ``InputRequiredResult`` recorded under that handle; no recorded state
+        # (unknown or already-used) fails closed — we never sign an unbound continuation.
+        continuation_kwargs: dict = {}
+        request_state = _continuation_state(params)
+        if request_state is not None:
+            entry = mrt.pop(request_state, None)
+            if entry is None:
+                emit(_reject(rid, "mcps.continuation_malformed"))
+                continue
+            continuation_kwargs = {
+                "continuation_previous_request_hash": entry[0],
+                "continuation_input_required_response_hash": entry[1],
+            }
+
         try:
             now = int(time.time())
             signed = mcps_sdk.sign_request_with_signer(
@@ -283,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
                 expires_at=_rfc3339(now + 300),
                 signer=signer,
                 policy=policy,
+                **continuation_kwargs,
             )
             body = post(signed.wire_bytes)
             result = mcps_sdk.verify_response(
@@ -297,7 +331,16 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         if result.accepted:
-            emit(_strip_envelope(json.loads(body)))
+            plain = _strip_envelope(json.loads(body))
+            # A verified, NON-TERMINAL InputRequiredResult (D7): record the continuation
+            # binding keyed by the server's opaque requestState so the answer leg can
+            # bind it. The elicitation is delivered to the harness either way.
+            if result.input_required:
+                inner = plain.get("result")
+                state = inner.get("requestState") if isinstance(inner, dict) else None
+                if isinstance(state, str):
+                    mrt[state] = (signed.request_hash, result.response_hash)
+            emit(plain)
         else:
             emit(_reject(rid, result.reason))
 

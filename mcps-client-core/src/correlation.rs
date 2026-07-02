@@ -19,8 +19,37 @@
 //! owns no clock. The mode-specific layer drives `sweep_expired` on a timer and
 //! supplies wall-clock time.
 
+use mcps_core::build_mcp_mrt_continuation;
+use mcps_core::Continuation;
 use mcps_core::McpsError;
 use std::collections::HashMap;
+
+/// The non-terminal record retained when a verified `InputRequiredResult` is
+/// correlated (ADR-MCPS-047 / D7 — "associate-without-consume").
+///
+/// The original request's response slot IS consumed (the `InputRequiredResult`
+/// arrived and verified), but the multi-round-trip stays associated: the client
+/// keeps the linkage needed to build the signed continuation and to reconcile the
+/// exchange. Its `nonce` remains reserved in the store's nonce window (a
+/// continuation uses a FRESH nonce). Swept on deadline like any other entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputRequiredRecord {
+    /// `request_hash` of the request that produced the `InputRequiredResult` — the
+    /// continuation's `previous_request_hash` (ADR-MCPS-047 / D4).
+    pub previous_request_hash: String,
+    /// Hash of the verified `InputRequiredResult` response preimage — the
+    /// continuation's `input_required_response_hash` (D4).
+    pub input_required_response_hash: String,
+    /// Deadline (unix seconds) inherited from the original request; the exchange
+    /// expires here if no continuation completes it.
+    pub deadline_unix: i64,
+    /// Route id the original request was sent on (the continuation reuses it).
+    pub route_id: String,
+    /// Resolved audience (the continuation targets the same verifier).
+    pub audience: String,
+    /// Signer identities a valid continuation response may carry.
+    pub expected_server_signers: Vec<String>,
+}
 
 /// Everything retained for one outstanding request, captured at send time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +119,9 @@ pub struct CorrelationStore {
     pending: HashMap<String, PendingRequest>,
     /// nonce -> the deadline until which it is considered "within window".
     nonce_window: HashMap<String, i64>,
+    /// Non-terminal multi-round-trip records (ADR-MCPS-047 / D7): correlation id ->
+    /// the verified `InputRequiredResult` linkage awaiting a signed continuation.
+    non_terminal: HashMap<String, InputRequiredRecord>,
 }
 
 impl CorrelationStore {
@@ -101,6 +133,18 @@ impl CorrelationStore {
     /// The number of currently-outstanding requests.
     pub fn outstanding(&self) -> usize {
         self.pending.len()
+    }
+
+    /// The number of non-terminal multi-round-trip records awaiting a continuation
+    /// (ADR-MCPS-047 / D7).
+    pub fn non_terminal_outstanding(&self) -> usize {
+        self.non_terminal.len()
+    }
+
+    /// The retained non-terminal record for `correlation_id`, if the exchange is
+    /// awaiting a signed continuation (ADR-MCPS-047 / D7).
+    pub fn input_required(&self, correlation_id: &str) -> Option<&InputRequiredRecord> {
+        self.non_terminal.get(correlation_id)
     }
 
     /// Register an outstanding request at `now_unix`.
@@ -155,9 +199,84 @@ impl CorrelationStore {
         }
     }
 
-    /// Cancel an outstanding request, returning its entry if present. The nonce
-    /// stays in the window until swept (cancelling does not re-open replay).
+    /// Read an outstanding request's retained state WITHOUT consuming it, applying
+    /// the same existence + deadline gate as [`take_for_response`](Self::take_for_response).
+    ///
+    /// The multi-round-trip flow (ADR-MCPS-047) needs the expected `request_hash`
+    /// BEFORE it can classify the response as terminal vs `InputRequiredResult` — but
+    /// it must not consume the slot until that decision is made (a terminal response
+    /// consumes via `take_for_response`; a non-terminal one via `record_input_required`).
+    /// A past-deadline entry is removed and reported [`CorrelationError::Expired`],
+    /// exactly like `take_for_response`; on success the entry stays in place.
+    pub fn peek_for_response(
+        &mut self,
+        correlation_id: &str,
+        now_unix: i64,
+    ) -> Result<PendingRequest, CorrelationError> {
+        match self.pending.get(correlation_id) {
+            None => Err(CorrelationError::Uncorrelatable),
+            Some(entry) if now_unix > entry.deadline_unix => {
+                self.pending.remove(correlation_id);
+                Err(CorrelationError::Expired)
+            }
+            Some(entry) => Ok(entry.clone()),
+        }
+    }
+
+    /// Correlate a verified, NON-TERMINAL `InputRequiredResult` for `correlation_id`
+    /// (ADR-MCPS-047 / D7 — associate-without-consume). Same existence + deadline
+    /// gate as [`take_for_response`](Self::take_for_response), but instead of
+    /// completing the exchange it:
+    ///
+    /// - consumes the original request's response slot (the `InputRequiredResult`
+    ///   arrived and verified — a second response for the same id must not correlate);
+    /// - retains an [`InputRequiredRecord`] linking the exchange, keyed by the same
+    ///   correlation id, so the client can look up the linkage and sweep it; and
+    /// - returns the typed [`Continuation`] binding (`previous_request_hash` = the
+    ///   original request hash, `input_required_response_hash` = the verified
+    ///   response preimage hash) to feed into the signed continuation request.
+    ///
+    /// The original nonce stays reserved in the window (the continuation MUST use a
+    /// fresh nonce). Caller MUST pass the hash of the ALREADY-VERIFIED response
+    /// preimage ([`mcps_core::response_hash`]); this store binds, it does not verify.
+    pub fn record_input_required(
+        &mut self,
+        correlation_id: &str,
+        input_required_response_hash: impl Into<String>,
+        now_unix: i64,
+    ) -> Result<Continuation, CorrelationError> {
+        let entry = match self.pending.get(correlation_id) {
+            None => return Err(CorrelationError::Uncorrelatable),
+            Some(entry) if now_unix > entry.deadline_unix => {
+                self.pending.remove(correlation_id);
+                return Err(CorrelationError::Expired);
+            }
+            Some(entry) => entry,
+        };
+        let input_required_response_hash = input_required_response_hash.into();
+        let record = InputRequiredRecord {
+            previous_request_hash: entry.request_hash.clone(),
+            input_required_response_hash: input_required_response_hash.clone(),
+            deadline_unix: entry.deadline_unix,
+            route_id: entry.route_id.clone(),
+            audience: entry.audience.clone(),
+            expected_server_signers: entry.expected_server_signers.clone(),
+        };
+        let continuation = build_mcp_mrt_continuation(
+            record.previous_request_hash.clone(),
+            input_required_response_hash,
+        );
+        // Consume the original response slot; keep the exchange associated.
+        self.pending.remove(correlation_id);
+        self.non_terminal.insert(correlation_id.to_string(), record);
+        Ok(continuation)
+    }
+
+    /// Cancel an outstanding request, returning its entry if present. Also drops any
+    /// non-terminal multi-round-trip record for the same id. The nonce stays in the
+    /// window until swept (cancelling does not re-open replay).
     pub fn cancel(&mut self, correlation_id: &str) -> Option<PendingRequest> {
+        self.non_terminal.remove(correlation_id);
         self.pending.remove(correlation_id)
     }
 
@@ -171,6 +290,10 @@ impl CorrelationStore {
             .retain(|_, entry| entry.deadline_unix >= now_unix);
         self.nonce_window
             .retain(|_, &mut retained_until| retained_until >= now_unix);
+        // Non-terminal MRT records expire on the same inherited deadline: an
+        // exchange with no completed continuation must not linger.
+        self.non_terminal
+            .retain(|_, record| record.deadline_unix >= now_unix);
         before - self.pending.len()
     }
 }
@@ -291,6 +414,134 @@ mod tests {
             store.take_for_response("c1", 1500).unwrap_err(),
             CorrelationError::Uncorrelatable
         );
+    }
+
+    #[test]
+    fn input_required_associates_without_completing_and_returns_binding() {
+        let mut store = CorrelationStore::new();
+        // Register with a known request_hash to check the continuation binding.
+        let mut p = pending("c1", "n1", 2000);
+        p.request_hash = "sha256:PREVIOUSAAAA".to_string();
+        store.register(p, 1000).unwrap();
+
+        let cont = store
+            .record_input_required("c1", "sha256:RESP1BBBB", 1500)
+            .unwrap();
+        // The binding ties the original request hash to the verified response hash.
+        assert_eq!(
+            cont,
+            mcps_core::Continuation::McpMrt {
+                previous_request_hash: "sha256:PREVIOUSAAAA".to_string(),
+                input_required_response_hash: "sha256:RESP1BBBB".to_string(),
+            }
+        );
+        // The original response slot is consumed, but the exchange stays associated.
+        assert_eq!(store.outstanding(), 0);
+        assert_eq!(store.non_terminal_outstanding(), 1);
+        let rec = store.input_required("c1").expect("retained");
+        assert_eq!(rec.input_required_response_hash, "sha256:RESP1BBBB");
+    }
+
+    #[test]
+    fn peek_reads_without_consuming() {
+        let mut store = CorrelationStore::new();
+        let mut p = pending("c1", "n1", 2000);
+        p.request_hash = "sha256:PEEKME".to_string();
+        store.register(p, 1000).unwrap();
+        // Peek twice: both succeed and the entry stays outstanding.
+        assert_eq!(
+            store.peek_for_response("c1", 1500).unwrap().request_hash,
+            "sha256:PEEKME"
+        );
+        assert_eq!(
+            store.peek_for_response("c1", 1500).unwrap().request_hash,
+            "sha256:PEEKME"
+        );
+        assert_eq!(store.outstanding(), 1);
+        // A real consume still works afterward.
+        assert!(store.take_for_response("c1", 1500).is_ok());
+        assert_eq!(store.outstanding(), 0);
+    }
+
+    #[test]
+    fn peek_unknown_is_uncorrelatable_and_expired_is_removed() {
+        let mut store = CorrelationStore::new();
+        assert_eq!(
+            store.peek_for_response("nope", 1000).unwrap_err(),
+            CorrelationError::Uncorrelatable
+        );
+        store.register(pending("c1", "n1", 2000), 1000).unwrap();
+        assert_eq!(
+            store.peek_for_response("c1", 2001).unwrap_err(),
+            CorrelationError::Expired
+        );
+        assert_eq!(store.outstanding(), 0);
+    }
+
+    #[test]
+    fn second_response_after_input_required_is_uncorrelatable() {
+        let mut store = CorrelationStore::new();
+        store.register(pending("c1", "n1", 2000), 1000).unwrap();
+        store
+            .record_input_required("c1", "sha256:RESP", 1500)
+            .unwrap();
+        // The slot was consumed; a stray terminal response for the same id fails closed.
+        assert_eq!(
+            store.take_for_response("c1", 1600).unwrap_err(),
+            CorrelationError::Uncorrelatable
+        );
+    }
+
+    #[test]
+    fn input_required_original_nonce_stays_reserved() {
+        let mut store = CorrelationStore::new();
+        store.register(pending("c1", "shared", 2000), 1000).unwrap();
+        store
+            .record_input_required("c1", "sha256:RESP", 1500)
+            .unwrap();
+        // A continuation MUST use a fresh nonce; reusing the original within window fails.
+        assert_eq!(
+            store
+                .register(pending("c2", "shared", 2000), 1600)
+                .unwrap_err(),
+            CorrelationError::NonceReuse
+        );
+    }
+
+    #[test]
+    fn input_required_on_unknown_id_is_uncorrelatable() {
+        let mut store = CorrelationStore::new();
+        assert_eq!(
+            store
+                .record_input_required("nope", "sha256:RESP", 1000)
+                .unwrap_err(),
+            CorrelationError::Uncorrelatable
+        );
+    }
+
+    #[test]
+    fn input_required_past_deadline_is_expired() {
+        let mut store = CorrelationStore::new();
+        store.register(pending("c1", "n1", 2000), 1000).unwrap();
+        assert_eq!(
+            store
+                .record_input_required("c1", "sha256:RESP", 2001)
+                .unwrap_err(),
+            CorrelationError::Expired
+        );
+    }
+
+    #[test]
+    fn sweep_drops_expired_non_terminal_records() {
+        let mut store = CorrelationStore::new();
+        store.register(pending("c1", "n1", 1500), 1000).unwrap();
+        store
+            .record_input_required("c1", "sha256:RESP", 1200)
+            .unwrap();
+        assert_eq!(store.non_terminal_outstanding(), 1);
+        // Past the inherited deadline (1500), the non-terminal record is swept.
+        store.sweep_expired(2000);
+        assert_eq!(store.non_terminal_outstanding(), 0);
     }
 
     #[test]

@@ -108,7 +108,6 @@ pub enum McpsError {
     // Granular for protocol/profile-confusion failures; low-level JSON
     // value-domain failures stay coarse under `CanonicalizationFailed`. All nine
     // are draft-02-scoped: draft-01 verification never emits them (ADR-MCPS-041).
-
     /// Draft-02 envelope lacks the protected `canonicalization_id` member.
     #[error("mcps.canonicalization_id_missing")]
     CanonicalizationIdMissing,
@@ -156,6 +155,21 @@ pub enum McpsError {
     /// (e.g. both binding forms present, or an ambiguous artifact representation).
     #[error("mcps.authorization_binding_ambiguous_bytes")]
     AuthorizationBindingAmbiguousBytes,
+
+    /// The optional draft-02 `continuation` object is present but `type` is not the
+    /// supported multi-round-trip token (`mcp-mrt`) — ADR-MCPS-047 / D4. A future
+    /// continuation profile would be a distinct token; anything unrecognized fails
+    /// closed rather than being treated as a bare (unbound) request.
+    #[error("mcps.continuation_type_unsupported")]
+    ContinuationTypeUnsupported,
+
+    /// The draft-02 `continuation` object is structurally invalid for its `type`
+    /// (missing/extra field, empty value, or a hash that is not a well-formed
+    /// `sha256:<base64url>` identifier) — ADR-MCPS-047 / D4. Core validates the
+    /// binding SHAPE only; the policy/server layer checks the hashes against the
+    /// verified `InputRequiredResult` it is answering.
+    #[error("mcps.continuation_malformed")]
+    ContinuationMalformed,
 }
 
 impl McpsError {
@@ -200,6 +214,8 @@ impl McpsError {
             McpsError::AuthorizationBindingAmbiguousBytes => {
                 "mcps.authorization_binding_ambiguous_bytes"
             }
+            McpsError::ContinuationTypeUnsupported => "mcps.continuation_type_unsupported",
+            McpsError::ContinuationMalformed => "mcps.continuation_malformed",
         }
     }
 }

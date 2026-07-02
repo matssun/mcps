@@ -25,10 +25,14 @@
 //! unforgeable proof token (its `server_signer` constructor is crate-private), so
 //! a "verified" verdict can only originate from real verification.
 
+use mcps_core::classify_result;
+use mcps_core::response_hash;
 use mcps_core::verify_response_draft02;
 use mcps_core::McpsError;
+use mcps_core::ResultClass;
 use mcps_core::TrustResolver;
 use mcps_core::VerifiedResponse;
+use serde_json::Value;
 
 /// What the client expects of the bound response for one outstanding request.
 ///
@@ -108,6 +112,54 @@ pub fn verify_signed_response(
     }
 
     Ok(verified)
+}
+
+/// A verified response plus its multi-round-trip classification (ADR-MCPS-047).
+///
+/// Produced by [`verify_and_classify_response`] AFTER the signature and request
+/// binding verify, so `class` is read from trusted (signed) bytes — never a forged
+/// `resultType`. `response_hash` is the hash of the signed response preimage; when
+/// `class == ResultClass::InputRequired` it is the `input_required_response_hash`
+/// the client binds into its continuation (feed it to
+/// [`crate::CorrelationStore::record_input_required`]).
+#[derive(Debug, Clone)]
+pub struct ClassifiedResponse {
+    /// The unforgeable verification verdict.
+    pub verified: VerifiedResponse,
+    /// Terminal vs non-terminal `InputRequiredResult`.
+    pub class: ResultClass,
+    /// `sha256:<b64url>` of the verified response preimage.
+    pub response_hash: String,
+}
+
+/// Verify a signed draft-02 response AND classify its result body for the
+/// multi-round-trip flow (ADR-MCPS-047 / D2 + D7).
+///
+/// Verifies exactly as [`verify_signed_response`] (fail-closed on any evidence
+/// failure), then — only on success — classifies the signed `result` body as
+/// terminal or `InputRequiredResult` and computes the response preimage hash. The
+/// classification is therefore never trusted from unverified bytes: an unsigned or
+/// tampered response fails at verification and never reaches classification.
+pub fn verify_and_classify_response(
+    raw_bytes: &[u8],
+    resolver: &dyn TrustResolver,
+    expectation: &ResponseExpectation,
+) -> Result<ClassifiedResponse, McpsError> {
+    let verified = verify_signed_response(raw_bytes, resolver, expectation)?;
+    // Verification already parsed and validated these bytes; re-model them to read
+    // the (now trusted) result body and compute the preimage hash.
+    let object: Value =
+        serde_json::from_slice(raw_bytes).map_err(|_| McpsError::CanonicalizationFailed)?;
+    let class = match object.get("result") {
+        Some(result) => classify_result(result),
+        None => ResultClass::Terminal,
+    };
+    let response_hash = response_hash(&object)?;
+    Ok(ClassifiedResponse {
+        verified,
+        class,
+        response_hash,
+    })
 }
 
 #[cfg(test)]
@@ -297,6 +349,123 @@ mod tests {
         assert_eq!(
             verify_signed_response(&bytes, &resolver_with_server(), &expectation(&rh)).unwrap_err(),
             McpsError::ResponseHashMismatch
+        );
+    }
+
+    /// Build a server-signed response whose `result` body is arbitrary (used for
+    /// the InputRequiredResult classification tests).
+    fn signed_response_with_result(request_hash: &str, result: Value) -> Vec<u8> {
+        let key = SigningKey::from_seed_bytes(&SERVER_SEED);
+        let mut result = result;
+        result["_meta"] = json!({
+            RESPONSE_META_KEY: {
+                "version": VERSION_DRAFT_02,
+                "canonicalization_id": CANONICALIZATION_ID_INT53_V1,
+                "request_hash": request_hash,
+                "server_signer": SERVER_SIGNER,
+                "issued_at": "2026-06-30T20:00:01Z",
+                "signature": { "alg": SIG_ALG_ED25519, "key_id": SERVER_KEY_ID },
+            }
+        });
+        let mut object = json!({ "jsonrpc": "2.0", "id": "req-1", "result": result });
+        let preimage = mcps_core::response_signing_preimage(&object).unwrap();
+        let sig = key.sign(&preimage);
+        object["result"]["_meta"][RESPONSE_META_KEY]["signature"]["value"] = Value::String(sig);
+        serde_json::to_vec(&object).unwrap()
+    }
+
+    #[test]
+    fn terminal_response_classifies_terminal() {
+        let rh = expected_request_hash();
+        let bytes = signed_response(&rh, &SERVER_SEED, SERVER_SIGNER, SERVER_KEY_ID);
+        let c = verify_and_classify_response(&bytes, &resolver_with_server(), &expectation(&rh))
+            .unwrap();
+        assert_eq!(c.class, ResultClass::Terminal);
+        assert!(c.response_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn input_required_response_classifies_non_terminal_with_hash() {
+        let rh = expected_request_hash();
+        let bytes = signed_response_with_result(
+            &rh,
+            json!({
+                "resultType": "inputRequired",
+                "inputRequests": { "confirm": { "type": "elicitation" } },
+                "requestState": "eyJzdGVwIjoxfQ"
+            }),
+        );
+        let c = verify_and_classify_response(&bytes, &resolver_with_server(), &expectation(&rh))
+            .unwrap();
+        assert_eq!(c.class, ResultClass::InputRequired);
+        // The response hash equals mcps-core's response_hash over the same bytes.
+        let object: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(c.response_hash, mcps_core::response_hash(&object).unwrap());
+    }
+
+    #[test]
+    fn tampered_input_requests_fails_response_verification() {
+        // The elicitation prompt fields are INSIDE the signed response preimage
+        // (ADR-MCPS-047 / D2): a server prompt cannot be forged. Flip inputRequests
+        // AFTER signing -> the signature no longer matches -> fail closed before the
+        // prompt is ever classified or shown.
+        let rh = expected_request_hash();
+        let bytes = signed_response_with_result(
+            &rh,
+            json!({
+                "resultType": "inputRequired",
+                "inputRequests": { "confirm": { "type": "elicitation", "message": "Delete 3 files?" } },
+                "requestState": "eyJzdGVwIjoxfQ"
+            }),
+        );
+        let mut object: Value = serde_json::from_slice(&bytes).unwrap();
+        // A middlebox rewrites the prompt to coerce a different answer.
+        object["result"]["inputRequests"]["confirm"]["message"] = json!("Keep all files?");
+        let tampered = serde_json::to_vec(&object).unwrap();
+        assert_eq!(
+            verify_and_classify_response(&tampered, &resolver_with_server(), &expectation(&rh))
+                .unwrap_err(),
+            McpsError::ResponseSigInvalid
+        );
+    }
+
+    #[test]
+    fn tampered_request_state_fails_response_verification() {
+        // requestState is opaque server continuation state, also inside the signed
+        // preimage (D2/D5). Tampering it AFTER signing breaks the signature — a
+        // continuation can never be steered onto a forged server state.
+        let rh = expected_request_hash();
+        let bytes = signed_response_with_result(
+            &rh,
+            json!({
+                "resultType": "inputRequired",
+                "inputRequests": { "confirm": { "type": "elicitation" } },
+                "requestState": "eyJzdGVwIjoxfQ"
+            }),
+        );
+        let mut object: Value = serde_json::from_slice(&bytes).unwrap();
+        object["result"]["requestState"] = json!("dGFtcGVyZWQtc3RhdGU");
+        let tampered = serde_json::to_vec(&object).unwrap();
+        assert_eq!(
+            verify_and_classify_response(&tampered, &resolver_with_server(), &expectation(&rh))
+                .unwrap_err(),
+            McpsError::ResponseSigInvalid
+        );
+    }
+
+    #[test]
+    fn input_required_but_tampered_fails_before_classification() {
+        // A forged resultType on an unsigned body must never be classified.
+        let rh = expected_request_hash();
+        let plain = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": "req-1",
+            "result": { "resultType": "inputRequired", "inputRequests": {} }
+        }))
+        .unwrap();
+        assert_eq!(
+            verify_and_classify_response(&plain, &resolver_with_server(), &expectation(&rh))
+                .unwrap_err(),
+            McpsError::MissingEnvelope
         );
     }
 

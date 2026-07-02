@@ -77,7 +77,7 @@ fn initialize_returns_well_formed_result() {
 }
 
 #[test]
-fn tools_list_advertises_four_scoped_tools() {
+fn tools_list_advertises_five_scoped_tools() {
     let server = server();
     let response = handle(
         &server,
@@ -101,11 +101,16 @@ fn tools_list_advertises_four_scoped_tools() {
             .to_string()
     };
 
-    assert_eq!(tools.len(), 4, "list_files, read_file, stat, write_file");
+    assert_eq!(
+        tools.len(),
+        5,
+        "list_files, read_file, stat, write_file, delete_files"
+    );
     assert_eq!(scope_of("list_files"), "protected");
     assert_eq!(scope_of("read_file"), "protected");
     assert_eq!(scope_of("stat"), "protected");
     assert_eq!(scope_of("write_file"), "admin");
+    assert_eq!(scope_of("delete_files"), "admin");
 
     // list_files keeps its single `path` arg; write_file also requires `content`.
     let list_schema = &tools.iter().find(|t| t["name"] == "list_files").unwrap()["inputSchema"];
@@ -470,4 +475,128 @@ fn received_log_records_dispatched_tools_only() {
     let entry: Value = serde_json::from_str(lines[0]).expect("log line is json");
     assert_eq!(entry["id"], 40);
     assert_eq!(entry["tool"], "stat");
+}
+
+// --- delete_files: the ADR-MCPS-047 multi-round-trip demo tool ---------------
+
+/// The first `delete_files` leg (no `inputResponses`) returns an
+/// `InputRequiredResult` carrying an elicitation prompt and an opaque `requestState`.
+#[test]
+fn delete_files_first_leg_elicits_with_request_state() {
+    let server = server();
+    let response = handle(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 50, "method": "tools/call",
+            "params": { "name": "delete_files", "arguments": { "paths": ["a.txt", "b.txt"] } }
+        }),
+    );
+    assert!(response.get("error").is_none());
+    let result = &response["result"];
+    assert_eq!(result["resultType"], "inputRequired");
+    assert_eq!(result["inputRequests"]["confirm"]["type"], "elicitation");
+    let state = result["requestState"].as_str().expect("opaque requestState");
+    assert!(!state.is_empty(), "elicitation must carry a requestState to echo");
+    // No terminal payload on the elicitation leg.
+    assert!(result.get("structuredContent").is_none());
+}
+
+/// The continuation leg (echoed `requestState` + `inputResponses`) returns the
+/// terminal result. The demo is a dry-run — it never touches the filesystem.
+#[test]
+fn delete_files_continuation_leg_returns_terminal_result() {
+    let server = server();
+    let elicit = handle(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 51, "method": "tools/call",
+            "params": { "name": "delete_files", "arguments": { "paths": ["a.txt", "b.txt"] } }
+        }),
+    );
+    let state = elicit["result"]["requestState"].as_str().unwrap().to_string();
+
+    let terminal = handle(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 52, "method": "tools/call",
+            "params": {
+                "name": "delete_files",
+                "arguments": { "paths": ["a.txt", "b.txt"] },
+                "inputResponses": { "confirm": true },
+                "requestState": state
+            }
+        }),
+    );
+    assert!(terminal.get("error").is_none());
+    let result = &terminal["result"];
+    assert_eq!(result["resultType"].as_str(), None, "terminal, not another elicitation");
+    assert_eq!(result["isError"], false);
+    assert_eq!(result["structuredContent"]["confirmed"], true);
+    assert_eq!(result["structuredContent"]["deleted"], json!(["a.txt", "b.txt"]));
+}
+
+/// Declining (`confirm: false`) still completes as a terminal result — nothing deleted.
+#[test]
+fn delete_files_declined_deletes_nothing() {
+    let server = server();
+    let elicit = handle(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 53, "method": "tools/call",
+            "params": { "name": "delete_files", "arguments": { "paths": ["x"] } }
+        }),
+    );
+    let state = elicit["result"]["requestState"].as_str().unwrap().to_string();
+    let terminal = handle(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 54, "method": "tools/call",
+            "params": {
+                "name": "delete_files", "arguments": { "paths": ["x"] },
+                "inputResponses": { "confirm": false }, "requestState": state
+            }
+        }),
+    );
+    assert_eq!(terminal["result"]["structuredContent"]["confirmed"], false);
+    assert_eq!(terminal["result"]["structuredContent"]["deleted"], json!([]));
+}
+
+/// A tampered/foreign `requestState` (or one that disagrees with the echoed paths)
+/// is refused in-band (the server's own D5 continuation-state validation).
+#[test]
+fn delete_files_rejects_tampered_request_state() {
+    let server = server();
+    // A syntactically invalid token.
+    let bad = handle(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 55, "method": "tools/call",
+            "params": {
+                "name": "delete_files", "arguments": { "paths": ["a.txt"] },
+                "inputResponses": { "confirm": true }, "requestState": "deadbeef"
+            }
+        }),
+    );
+    assert_eq!(bad["result"]["isError"], true);
+
+    // A valid token for DIFFERENT paths than the echoed ones — must not validate.
+    let elicit = handle(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 56, "method": "tools/call",
+            "params": { "name": "delete_files", "arguments": { "paths": ["a.txt"] } }
+        }),
+    );
+    let state = elicit["result"]["requestState"].as_str().unwrap().to_string();
+    let mismatched = handle(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 57, "method": "tools/call",
+            "params": {
+                "name": "delete_files", "arguments": { "paths": ["b.txt"] },
+                "inputResponses": { "confirm": true }, "requestState": state
+            }
+        }),
+    );
+    assert_eq!(mismatched["result"]["isError"], true, "requestState/paths mismatch must fail");
 }

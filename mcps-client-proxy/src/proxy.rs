@@ -16,6 +16,7 @@ use mcps_client_core::build_signed_request_with_signer;
 use mcps_client_core::classify_response_result;
 use mcps_client_core::decide;
 use mcps_client_core::resolve_authorization_binding;
+use mcps_client_core::verify_and_classify_response;
 use mcps_client_core::AbsenceReason;
 use mcps_client_core::BindingRequestContext;
 use mcps_client_core::ClientAuditEvent;
@@ -29,12 +30,15 @@ use mcps_client_core::RequestSigningInputs;
 use mcps_client_core::ResponseExpectation;
 use mcps_client_core::SignerPolicy;
 use mcps_core::unwrap_verified_result;
+use mcps_core::Continuation;
 use mcps_core::McpsError;
+use mcps_core::ResultClass;
 use mcps_core::TrustResolver;
 use mcps_core::CANONICALIZATION_ID_INT53_V1;
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::route::RouteRegistry;
 use crate::transport::ProxyError;
@@ -81,6 +85,12 @@ pub struct ClientProxy {
     trust_resolver: Box<dyn TrustResolver>,
     transport: Box<dyn RemoteTransport>,
     correlation: CorrelationStore,
+    /// Pending multi-round-trip continuations (ADR-MCPS-047): server `requestState`
+    /// -> the signed [`Continuation`] binding to attach when the local client
+    /// re-issues the call with its `inputResponses`. Keyed by `requestState` because
+    /// the continuation call carries a FRESH JSON-RPC id, and the echoed opaque
+    /// `requestState` is the only stable handle linking the two legs.
+    continuations: HashMap<String, Continuation>,
 }
 
 impl ClientProxy {
@@ -99,6 +109,7 @@ impl ClientProxy {
             trust_resolver,
             transport,
             correlation: CorrelationStore::new(),
+            continuations: HashMap::new(),
         }
     }
 
@@ -145,8 +156,21 @@ impl ClientProxy {
             &ctx,
         )?;
 
+        // Continuation answer leg (ADR-MCPS-047 / D3+D4): an answer carries BOTH
+        // `inputResponses` and the echoed `requestState` (SEP-2322) — the same gate the
+        // SDK drivers apply. Only then do we bind the stored continuation we retained
+        // from the prior InputRequiredResult. `remove` consumes it — a continuation is
+        // single-use; a replayed answer finds nothing and is signed as an ordinary
+        // (unbound) request, which the server rejects on its own requestState rules.
+        // Gating on `inputResponses` too avoids burning the single-use state on a
+        // malformed/partial follow-up that echoes `requestState` without answering.
+        let continuation = match (req_params.get("inputResponses"), req_params.get("requestState")) {
+            (Some(_), Some(state)) => state.as_str().and_then(|s| self.continuations.remove(s)),
+            _ => None,
+        };
+
         // Build + sign the draft-02 request through the custody seam.
-        let inputs = RequestSigningInputs::with_default_canonicalization(
+        let mut inputs = RequestSigningInputs::with_default_canonicalization(
             self.signer.signer_id(),
             self.signer.key_id(),
             &params.on_behalf_of,
@@ -156,6 +180,9 @@ impl ClientProxy {
             &params.issued_at,
             &params.expires_at,
         );
+        if let Some(continuation) = continuation {
+            inputs = inputs.with_continuation(continuation);
+        }
         let signed = build_signed_request_with_signer(
             &id,
             &method,
@@ -201,16 +228,49 @@ impl ClientProxy {
             }
         };
 
-        // Verify the signed response and classify the outcome.
+        // Verify the signed response AND classify it for the multi-round-trip flow
+        // (ADR-MCPS-047 / D2). Classification reads only the SIGNED result body.
         let expectation =
             ResponseExpectation::new(signed.request_hash(), CANONICALIZATION_ID_INT53_V1)
                 .with_expected_server_signer(&route.signer_audience.expected_server_signer);
-        let verify_result = mcps_client_core::verify_signed_response(
+        let classified = verify_and_classify_response(
             &response_bytes,
             self.trust_resolver.as_ref(),
             &expectation,
         );
-        let outcome = classify_response_result(verify_result);
+
+        // A verified, NON-TERMINAL InputRequiredResult (D2/D7): retain the exchange
+        // (associate-without-consume) instead of completing it, stash the continuation
+        // binding keyed by the server's `requestState`, and return the elicitation as
+        // PLAIN MCP so the unmodified client can answer. The answer leg (above) attaches
+        // the stored continuation, transparently completing the round trip.
+        if let Ok(c) = &classified {
+            if c.class == ResultClass::InputRequired {
+                let outcome = classify_response_result(Ok(c.verified.clone()));
+                let decision = decide(route.enforcement_mode, route.legacy_allowed, &outcome);
+                let audit = audit_for_decision(&decision);
+                let continuation = self.correlation.record_input_required(
+                    &correlation_id,
+                    &c.response_hash,
+                    params.now_unix,
+                )?;
+                let plain = plain_response_from_verified(&id, &response_bytes)?;
+                if let Some(state) = plain
+                    .get("result")
+                    .and_then(|r| r.get("requestState"))
+                    .and_then(Value::as_str)
+                {
+                    self.continuations.insert(state.to_string(), continuation);
+                }
+                return Ok(ProxyResponse {
+                    plain_response: plain,
+                    audit,
+                    path: ClientPath::McpsVerified,
+                });
+            }
+        }
+
+        let outcome = classify_response_result(classified.map(|c| c.verified));
 
         // Correlate (cleanup-on-completion). A late/uncorrelatable response fails closed.
         self.correlation

@@ -78,6 +78,33 @@ class McpsConfig:
     allow_unverified_server_initiated: bool = False
 
 
+@dataclass
+class _MrtEntry:
+    """Recorded multi-round-trip state for one verified ``InputRequiredResult``
+    (ADR-MCPS-047). The SECURITY binding is these two hashes — both taken from the
+    verified, signed elicitation response — plus the route/audience context. The
+    server-provided ``requestState`` is only the opaque LOOKUP handle used to match
+    the answer leg; it is never the security key.
+    """
+
+    previous_request_hash: str
+    input_required_response_hash: str
+    route_id: str
+    audience: str
+
+
+def _continuation_answer(method: Optional[str], params: Any) -> Optional[str]:
+    """If ``params`` is a continuation answer (carries ``inputResponses`` AND an
+    echoed ``requestState``, SEP-2322), return the ``requestState`` handle; else None.
+    """
+    if not isinstance(params, dict):
+        return None
+    if "inputResponses" in params and "requestState" in params:
+        state = params["requestState"]
+        return state if isinstance(state, str) else None
+    return None
+
+
 def _rfc3339(unix: int) -> str:
     return datetime.fromtimestamp(unix, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -133,15 +160,45 @@ def sign_outbound(
     now_unix: int,
     nonce: str,
     expires_unix: int,
+    mrt: Optional[dict] = None,
 ) -> bytes:
     """Sign an outbound request and register it for correlation; return wire bytes.
 
     A non-request (notification / a response to a server-initiated request) is
     passed through plain for now — signing those is a later slice (#199 gap).
+
+    ADR-MCPS-047 answer leg: a request carrying ``inputResponses`` + an echoed
+    ``requestState`` is a continuation. Its recorded multi-round-trip state (from the
+    verified ``InputRequiredResult`` — see :func:`verify_inbound`) is looked up in
+    ``mrt`` by the ``requestState`` handle and the fresh request is bound to the
+    verified elicitation's ``previous_request_hash`` / ``input_required_response_hash``.
+    A continuation with NO matching recorded state — or a route/audience mismatch —
+    FAILS CLOSED (we never sign an unbound continuation).
     """
     is_request, rid, method, params = _request_fields(session_message)
     if not is_request:
         return session_message.message.model_dump_json(by_alias=True, exclude_none=True).encode()
+
+    continuation_kwargs: dict = {}
+    request_state = _continuation_answer(method, params)
+    if request_state is not None:
+        entry = mrt.pop(request_state, None) if mrt is not None else None
+        if entry is None:
+            raise ValueError(
+                "mcps.continuation_malformed: no recorded multi-round-trip state for the "
+                "answered InputRequiredResult (unknown or already-used requestState)"
+            )
+        # The binding is to the verified elicitation's hashes; validate the exchange
+        # context too so a continuation cannot be replayed onto another route/audience.
+        if entry.route_id != config.route_id or entry.audience != config.audience:
+            raise ValueError(
+                "mcps.continuation_malformed: continuation route/audience does not match "
+                "the recorded InputRequiredResult exchange"
+            )
+        continuation_kwargs = {
+            "continuation_previous_request_hash": entry.previous_request_hash,
+            "continuation_input_required_response_hash": entry.input_required_response_hash,
+        }
 
     signed = mcps_sdk.sign_request_with_signer(
         json.dumps(rid),
@@ -155,6 +212,7 @@ def sign_outbound(
         signer=config.signer,
         policy=config.policy,
         **_binding_kwargs(config, method, params, expires_unix),
+        **continuation_kwargs,
     )
     correlation.register(
         correlation_id=str(rid),
@@ -205,6 +263,7 @@ def verify_inbound(
     correlation: Any,
     *,
     now_unix: int,
+    mrt: Optional[dict] = None,
 ) -> InboundOutcome:
     """Correlate + verify one inbound line.
 
@@ -212,6 +271,14 @@ def verify_inbound(
     verified; on accept the MCP-S envelope is stripped and a plain SessionMessage is
     returned. A late/uncorrelatable/expired correlation or a failed verification is
     a fail-closed reject.
+
+    ADR-MCPS-047: a verified response is classified. A TERMINAL result consumes the
+    correlation slot (``take_for_response``). A non-terminal ``InputRequiredResult``
+    does NOT — it is recorded (``record_input_required``, associate-without-consume)
+    and, when ``mrt`` is provided, its verified ``(previous_request_hash,
+    input_required_response_hash)`` is stashed keyed by the response's opaque
+    ``requestState`` so the answer leg can bind a signed continuation. The plain
+    elicitation is delivered to the session either way.
 
     A SERVER-INITIATED message (it carries a ``method`` — a server->client request if
     id-bearing, a notification if not) is NOT a response to one of our requests, so
@@ -227,7 +294,9 @@ def verify_inbound(
 
     if has_method:
         # Server-initiated request/notification — no request_hash binding exists, so
-        # the core cannot verify it. Apply the inbound policy.
+        # the core cannot verify it. Apply the inbound policy. NOTE: a legitimate
+        # elicitation arrives as a RESPONSE (InputRequiredResult, no method); a
+        # `method`-bearing server push is arbitrary push and stays out (D9).
         if config.allow_unverified_server_initiated:
             return InboundOutcome("passthrough", message=_session_message(obj))
         reason = "mcps.missing_envelope" if rid is not None else "mcps.notification_forbidden"
@@ -238,9 +307,10 @@ def verify_inbound(
         # closed rather than deliver an uncorrelatable, unverifiable message.
         return InboundOutcome("reject", reason="mcps.missing_envelope")
 
-    # A response to one of our outstanding requests.
+    # A response to one of our outstanding requests. PEEK (do not consume yet): the
+    # terminal-vs-InputRequiredResult decision is made only after verification.
     try:
-        entry = correlation.take_for_response(str(rid), now_unix)
+        entry = correlation.peek_for_response(str(rid), now_unix)
     except ValueError as exc:
         # late / uncorrelatable / expired -> fail closed. Normalize to the bare
         # mcps.* wire code so reject reasons are consistent with the verify path.
@@ -255,10 +325,24 @@ def verify_inbound(
         legacy_allowed=config.legacy_allowed,
     )
     if result.accepted:
+        if result.input_required:
+            # Non-terminal (D7): retain the exchange and record the verified linkage.
+            prev, resp = correlation.record_input_required(str(rid), result.response_hash, now_unix)
+            plain = _strip_envelope(obj)
+            inner = plain.get("result")
+            request_state = inner.get("requestState") if isinstance(inner, dict) else None
+            if mrt is not None and isinstance(request_state, str):
+                mrt[request_state] = _MrtEntry(prev, resp, config.route_id, config.audience)
+            return InboundOutcome("accept", message=_session_message(plain))
+        # Terminal: consume the correlation slot (cleanup-on-completion).
+        correlation.take_for_response(str(rid), now_unix)
         return InboundOutcome("accept", message=_session_message(_strip_envelope(obj)))
     if result.decision == "fallback":
         # Config-permitted legacy/plaintext pass-through (audited as no-evidence).
+        correlation.take_for_response(str(rid), now_unix)
         return InboundOutcome("accept", message=_session_message(obj))
+    # Fail closed: consume the slot so a rejected response cannot be retried.
+    correlation.cancel(str(rid))
     return InboundOutcome("reject", reason=result.reason)
 
 
@@ -291,6 +375,10 @@ class McpsTransport:
         self._correlation = correlation or mcps_sdk.CorrelationStore()
         self._clock = clock or (lambda: int(time.time()))
         self._nonce_factory = nonce_factory or (lambda: secrets.token_urlsafe(16))
+        # ADR-MCPS-047 multi-round-trip state: requestState handle -> recorded
+        # continuation binding, shared between the reader (records it) and writer
+        # (consumes it on the answer leg).
+        self._mrt: dict = {}
         self._tg = None
         self._app_read_send = None
         self._app_write_recv = None
@@ -322,6 +410,7 @@ class McpsTransport:
                 now_unix=now,
                 nonce=self._nonce_factory(),
                 expires_unix=now + self._config.ttl_seconds,
+                mrt=self._mrt,
             )
             await self._byte_send(wire + b"\n")
 
@@ -329,7 +418,9 @@ class McpsTransport:
         async for line in self._byte_lines:
             if not line:
                 continue
-            outcome = verify_inbound(line, self._config, self._correlation, now_unix=self._clock())
+            outcome = verify_inbound(
+                line, self._config, self._correlation, now_unix=self._clock(), mrt=self._mrt
+            )
             if outcome.kind in ("accept", "passthrough"):
                 await self._app_read_send.send(outcome.message)
             else:

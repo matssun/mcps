@@ -1,0 +1,52 @@
+# MCP-S TypeScript SDK — native core binding (ADR-MCPS-044 §SDK wrap-or-fork rule;
+# TypeScript after Python, ADR-MCPS-047 v0.8).
+#
+# This napi-rs layer exposes the AUDITED `mcps-client-core` signing / verification /
+# enforcement logic to Node.js, so the TypeScript SDK shares ONE implementation of
+# the canonical signed preimage with the Rust proxy AND the Python SDK — no parallel
+# reimplementation (the one thing CONTEXT.md forbids). The napi binding is the exact
+# analog of the Python SDK's PyO3 binding (`sdk/python/src/lib.rs`).
+#
+# It declares its OWN empty `[workspace]` table so it is a SEPARATE Cargo workspace,
+# deliberately excluded from the root workspace: a napi `cdylib` built by
+# `@napi-rs/cli` must not perturb `cargo build` / `bazel test //...` or the mcps-core
+# purity story. It still path-depends on the in-repo crates.
+[package]
+name = "mcps-typescript-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Mats Sundvall"]
+description = "napi-rs binding exposing mcps-client-core to the MCP-S TypeScript SDK (transport adapter; ADR-MCPS-044)."
+publish = false
+
+# Nested-but-independent: an empty [workspace] makes this its own workspace root,
+# so the parent workspace ignores it (no edit to the root Cargo.toml needed).
+[workspace]
+
+[lib]
+# cdylib: the Node.js native addon (`@napi-rs/cli` renames the artifact to
+# `mcps-sdk-core.<platform>.node` and generates the JS/`.d.ts` binding shims).
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The audited client seam + the pure primitives. The whole point of the binding:
+# one source of truth for the signed preimage, shared with mcps-client-proxy.
+mcps-client-core = { path = "../../mcps-client-core" }
+mcps-core = { path = "../../mcps-core" }
+serde_json = "1.0"
+
+# napi-rs 3.x: the N-API bindings. `default-features = false` drops the tokio async
+# runtime — the whole binding is synchronous (sign/verify are deterministic pure
+# functions), and the non-exporting signer calls its JS callback synchronously on
+# the Node main thread via the `Function`/`FunctionRef` seam.
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = "symbols"

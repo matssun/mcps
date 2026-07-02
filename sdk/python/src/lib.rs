@@ -23,21 +23,24 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use mcps_client_core::{
-    audit_for_decision, build_signed_request, build_signed_request_with_signer,
-    classify_response_result, decide, verify_signed_response, AbsenceReason, ClientOutcome,
-    ClientPath, ClientSigner, CorrelationError, CorrelationStore, CustodyClass, DevFileSigner,
-    EnforcementDecision, EnforcementMode, Environment, PendingRequest, RequestSigningInputs,
-    ResponseExpectation, SignerPolicy, SoftwareSigner,
-};
 use mcps_client_core::authz::{
     binding_tag, AuthorizationBindingPolicy, AuthorizationBindingProvider, BindingRequestContext,
     BindingTypeTag, OpaqueBytesProvider,
 };
+use mcps_client_core::{
+    audit_for_decision, build_signed_request, build_signed_request_with_signer,
+    classify_response_result, decide, verify_and_classify_response, AbsenceReason, ClientOutcome,
+    ClientPath, ClientSigner, CorrelationError, CorrelationStore, CustodyClass, DevFileSigner,
+    EnforcementDecision, EnforcementMode, Environment, PendingRequest, RequestSigningInputs,
+    ResponseExpectation, SignerPolicy, SoftwareSigner,
+};
 use mcps_core::ids::{
     BINDING_TYPE_AUTHZ_SYSTEM_REFERENCE, BINDING_TYPE_OPAQUE_BYTES, DIGEST_ALG_SHA256,
 };
-use mcps_core::{AuthorizationBinding, InMemoryTrustResolver, McpsError, SigningKey, VerificationKey};
+use mcps_core::{
+    build_mcp_mrt_continuation, AuthorizationBinding, InMemoryTrustResolver, McpsError,
+    ResultClass, SigningKey, VerificationKey,
+};
 use serde_json::{Map, Value};
 
 // --- shared helpers --------------------------------------------------------
@@ -48,7 +51,8 @@ fn to_py_err(e: McpsError) -> PyErr {
 }
 
 fn parse_id(id_json: &str) -> PyResult<Value> {
-    serde_json::from_str(id_json).map_err(|e| PyValueError::new_err(format!("invalid id_json: {e}")))
+    serde_json::from_str(id_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid id_json: {e}")))
 }
 
 fn parse_params(params_json: &str) -> PyResult<Map<String, Value>> {
@@ -61,6 +65,27 @@ fn seed_to_key(seed: &[u8]) -> PyResult<SigningKey> {
         PyValueError::new_err(format!("seed must be exactly 32 bytes, got {}", seed.len()))
     })?;
     Ok(SigningKey::from_seed_bytes(&seed))
+}
+
+/// Attach an ADR-MCPS-047 continuation binding to signing inputs when both hashes
+/// are supplied (the answer leg of a multi-round-trip). Supplying exactly one is a
+/// caller error — a continuation binds BOTH the previous request and the verified
+/// `InputRequiredResult`.
+fn apply_continuation(
+    inputs: RequestSigningInputs,
+    previous_request_hash: Option<&str>,
+    input_required_response_hash: Option<&str>,
+) -> PyResult<RequestSigningInputs> {
+    match (previous_request_hash, input_required_response_hash) {
+        (Some(prev), Some(resp)) => {
+            Ok(inputs.with_continuation(build_mcp_mrt_continuation(prev, resp)))
+        }
+        (None, None) => Ok(inputs),
+        _ => Err(PyValueError::new_err(
+            "continuation requires BOTH continuation_previous_request_hash and \
+             continuation_input_required_response_hash",
+        )),
+    }
 }
 
 fn opaque_binding(digest_alg: &str, digest_value: &str) -> AuthorizationBinding {
@@ -374,6 +399,7 @@ impl PySignerPolicy {
     signer, key_id, on_behalf_of, audience,
     nonce, issued_at, expires_at, seed,
     authorization_binding=None, binding_digest_alg=None, binding_digest_value=None,
+    continuation_previous_request_hash=None, continuation_input_required_response_hash=None,
 ))]
 fn sign_request(
     id_json: &str,
@@ -390,11 +416,17 @@ fn sign_request(
     authorization_binding: Option<PyRef<'_, PyAuthorizationBinding>>,
     binding_digest_alg: Option<&str>,
     binding_digest_value: Option<&str>,
+    continuation_previous_request_hash: Option<&str>,
+    continuation_input_required_response_hash: Option<&str>,
 ) -> PyResult<PySignedRequest> {
     let id = parse_id(id_json)?;
     let params = parse_params(params_json)?;
     let key = seed_to_key(seed)?;
-    let binding = resolve_binding(authorization_binding, binding_digest_alg, binding_digest_value)?;
+    let binding = resolve_binding(
+        authorization_binding,
+        binding_digest_alg,
+        binding_digest_value,
+    )?;
     let inputs = RequestSigningInputs::with_default_canonicalization(
         signer,
         key_id,
@@ -405,6 +437,11 @@ fn sign_request(
         issued_at,
         expires_at,
     );
+    let inputs = apply_continuation(
+        inputs,
+        continuation_previous_request_hash,
+        continuation_input_required_response_hash,
+    )?;
     let signed = build_signed_request(&id, method, params, &inputs, &key).map_err(to_py_err)?;
     Ok(PySignedRequest::from_signed(signed))
 }
@@ -420,6 +457,7 @@ fn sign_request(
     on_behalf_of, audience,
     nonce, issued_at, expires_at, signer, policy,
     authorization_binding=None, binding_digest_alg=None, binding_digest_value=None,
+    continuation_previous_request_hash=None, continuation_input_required_response_hash=None,
 ))]
 fn sign_request_with_signer(
     id_json: &str,
@@ -435,10 +473,16 @@ fn sign_request_with_signer(
     authorization_binding: Option<PyRef<'_, PyAuthorizationBinding>>,
     binding_digest_alg: Option<&str>,
     binding_digest_value: Option<&str>,
+    continuation_previous_request_hash: Option<&str>,
+    continuation_input_required_response_hash: Option<&str>,
 ) -> PyResult<PySignedRequest> {
     let id = parse_id(id_json)?;
     let params = parse_params(params_json)?;
-    let binding = resolve_binding(authorization_binding, binding_digest_alg, binding_digest_value)?;
+    let binding = resolve_binding(
+        authorization_binding,
+        binding_digest_alg,
+        binding_digest_value,
+    )?;
     let s = signer.as_dyn();
     // signer/key_id here are overridden from the signer by the core; pass the
     // signer's identity for a faithful (non-misleading) inputs value.
@@ -452,6 +496,11 @@ fn sign_request_with_signer(
         issued_at,
         expires_at,
     );
+    let inputs = apply_continuation(
+        inputs,
+        continuation_previous_request_hash,
+        continuation_input_required_response_hash,
+    )?;
     let signed = build_signed_request_with_signer(&id, method, params, &inputs, s, &policy.inner)
         .map_err(to_py_err)?;
     Ok(PySignedRequest::from_signed(signed))
@@ -478,15 +527,23 @@ impl PyTrustResolver {
 
     /// Register a server signer by its raw 32-byte Ed25519 PUBLIC key. This is the
     /// real verifier input.
-    fn insert_public_key(&mut self, signer_id: &str, key_id: &str, public_key: &[u8]) -> PyResult<()> {
+    fn insert_public_key(
+        &mut self,
+        signer_id: &str,
+        key_id: &str,
+        public_key: &[u8],
+    ) -> PyResult<()> {
         let pk: [u8; 32] = public_key.try_into().map_err(|_| {
             PyValueError::new_err(format!(
                 "public_key must be exactly 32 bytes, got {}",
                 public_key.len()
             ))
         })?;
-        self.inner
-            .insert(signer_id, key_id, VerificationKey::from_bytes(&pk).map_err(to_py_err)?);
+        self.inner.insert(
+            signer_id,
+            key_id,
+            VerificationKey::from_bytes(&pk).map_err(to_py_err)?,
+        );
         Ok(())
     }
 
@@ -534,6 +591,19 @@ struct PyVerifyResult {
     /// Convenience: true iff the decision was AcceptMcps.
     #[pyo3(get)]
     accepted: bool,
+    /// ADR-MCPS-047 classification of the SIGNED result body: "terminal" or
+    /// "input_required". Read only from verified bytes; "terminal" when unverified.
+    #[pyo3(get)]
+    result_class: &'static str,
+    /// The verified response preimage hash (`sha256:<b64url>`) on a verified
+    /// exchange; else `None`. When `result_class == "input_required"` this is the
+    /// `continuation_input_required_response_hash` to pass to `sign_request` for the
+    /// answer leg (with the original `request_hash` as the previous hash).
+    #[pyo3(get)]
+    response_hash: Option<String>,
+    /// Convenience: true iff `result_class == "input_required"`.
+    #[pyo3(get)]
+    input_required: bool,
 }
 
 #[pymethods]
@@ -574,14 +644,28 @@ fn verify_response(
     }
     let mode = parse_mode(enforcement_mode)?;
 
-    let result = verify_signed_response(raw_bytes, &resolver.inner, &expectation);
-    // Capture the verified identity before the value is moved into the outcome.
-    let verified = result
-        .as_ref()
-        .ok()
-        .map(|v| (v.server_signer().to_string(), v.key_id().to_string(), v.request_hash().to_string()));
+    let classified = verify_and_classify_response(raw_bytes, &resolver.inner, &expectation);
+    // Capture the verified identity + multi-round-trip classification before the
+    // value is moved into the outcome.
+    let verified = classified.as_ref().ok().map(|c| {
+        (
+            c.verified.server_signer().to_string(),
+            c.verified.key_id().to_string(),
+            c.verified.request_hash().to_string(),
+        )
+    });
+    let (result_class, response_hash) = match classified.as_ref().ok() {
+        Some(c) => (
+            match c.class {
+                ResultClass::Terminal => "terminal",
+                ResultClass::InputRequired => "input_required",
+            },
+            Some(c.response_hash.clone()),
+        ),
+        None => ("terminal", None),
+    };
 
-    let outcome = classify_response_result(result);
+    let outcome = classify_response_result(classified.map(|c| c.verified));
     let decision = decide(mode, legacy_allowed, &outcome);
     let audit = audit_for_decision(&decision);
 
@@ -614,6 +698,9 @@ fn verify_response(
         key_id,
         request_hash,
         accepted,
+        result_class,
+        response_hash,
+        input_required: result_class == "input_required",
     })
 }
 
@@ -734,11 +821,63 @@ impl PyCorrelationStore {
     /// Correlate an incoming response by `correlation_id` at `now_unix`, removing and
     /// returning the pending entry (cleanup-on-completion). A late/uncorrelatable or
     /// past-deadline response fails closed.
-    fn take_for_response(&mut self, correlation_id: &str, now_unix: i64) -> PyResult<PyPendingEntry> {
+    fn take_for_response(
+        &mut self,
+        correlation_id: &str,
+        now_unix: i64,
+    ) -> PyResult<PyPendingEntry> {
         self.inner
             .take_for_response(correlation_id, now_unix)
             .map(PyPendingEntry::from_pending)
             .map_err(corr_err)
+    }
+
+    /// Read an outstanding request's state WITHOUT consuming it (same existence +
+    /// deadline gate as `take_for_response`). The multi-round-trip flow peeks the
+    /// expected `request_hash` before classifying a response as terminal vs
+    /// `InputRequiredResult`, then consumes via `take_for_response` (terminal) or
+    /// `record_input_required` (non-terminal).
+    fn peek_for_response(
+        &mut self,
+        correlation_id: &str,
+        now_unix: i64,
+    ) -> PyResult<PyPendingEntry> {
+        self.inner
+            .peek_for_response(correlation_id, now_unix)
+            .map(PyPendingEntry::from_pending)
+            .map_err(corr_err)
+    }
+
+    /// Correlate a verified, NON-TERMINAL `InputRequiredResult` (ADR-MCPS-047 / D7 —
+    /// associate-without-consume). Consumes the original response slot but retains
+    /// the exchange, and returns the continuation binding as a
+    /// `(previous_request_hash, input_required_response_hash)` tuple — pass these to
+    /// `sign_request(..., continuation_previous_request_hash=...,
+    /// continuation_input_required_response_hash=...)` to sign the answer leg.
+    /// `input_required_response_hash` is `VerifyResult.response_hash` from the
+    /// verified elicitation. Fails closed exactly like `take_for_response`.
+    fn record_input_required(
+        &mut self,
+        correlation_id: &str,
+        input_required_response_hash: &str,
+        now_unix: i64,
+    ) -> PyResult<(String, String)> {
+        let continuation = self
+            .inner
+            .record_input_required(correlation_id, input_required_response_hash, now_unix)
+            .map_err(corr_err)?;
+        match continuation {
+            mcps_core::Continuation::McpMrt {
+                previous_request_hash,
+                input_required_response_hash,
+            } => Ok((previous_request_hash, input_required_response_hash)),
+        }
+    }
+
+    /// The number of non-terminal multi-round-trip records awaiting a continuation.
+    #[getter]
+    fn non_terminal_outstanding(&self) -> usize {
+        self.inner.non_terminal_outstanding()
     }
 
     /// Cancel an outstanding request; returns whether an entry was present.
@@ -812,7 +951,9 @@ impl PyAuthorizationBinding {
     fn binding_type(&self) -> &'static str {
         match &self.inner {
             AuthorizationBinding::OpaqueBytes { .. } => BINDING_TYPE_OPAQUE_BYTES,
-            AuthorizationBinding::AuthzSystemReference { .. } => BINDING_TYPE_AUTHZ_SYSTEM_REFERENCE,
+            AuthorizationBinding::AuthzSystemReference { .. } => {
+                BINDING_TYPE_AUTHZ_SYSTEM_REFERENCE
+            }
         }
     }
 
@@ -828,7 +969,9 @@ impl PyAuthorizationBinding {
     fn digest_value(&self) -> String {
         match &self.inner {
             AuthorizationBinding::OpaqueBytes { digest_value, .. }
-            | AuthorizationBinding::AuthzSystemReference { digest_value, .. } => digest_value.clone(),
+            | AuthorizationBinding::AuthzSystemReference { digest_value, .. } => {
+                digest_value.clone()
+            }
         }
     }
 

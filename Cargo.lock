@@ -661,7 +661,7 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "mcps-client-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-core",
  "serde_json",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-client-proxy"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-client-core",
  "mcps-core",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-client-proxy-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-client-core",
  "mcps-client-proxy",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-conformance"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-client-core",
  "mcps-core",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-demo"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-core",
  "mcps-host",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-demo-fileserver"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-test-paths",
  "serde",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-demo-server"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-test-paths",
  "serde",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-host"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "getrandom 0.2.17",
  "mcps-core",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-policy"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-core",
  "mcps-host",
@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-proxy"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "asn1-rs",
  "base64",
@@ -810,11 +810,11 @@ dependencies = [
 
 [[package]]
 name = "mcps-test-paths"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "mcps-transport"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-proxy",
  "rcgen",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "mcps-walkthrough"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mcps-client-core",
  "mcps-core",

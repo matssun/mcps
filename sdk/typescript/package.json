@@ -1,0 +1,39 @@
+{
+  "name": "@mcps/sdk",
+  "version": "0.1.0",
+  "description": "MCP-S TypeScript SDK — runtime-evidence security (signed requests, verified responses) for the MCP TypeScript SDK, via a transport adapter over the audited mcps-client-core.",
+  "license": "Apache-2.0",
+  "author": "Mats Sundvall",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "native/binding.js",
+    "native/binding.d.ts",
+    "native/*.node"
+  ],
+  "napi": {
+    "binaryName": "mcps-sdk-core",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  },
+  "scripts": {
+    "build:native": "napi build --platform --release --manifest-path Cargo.toml --output-dir native --js binding.js --dts binding.d.ts",
+    "build:native:debug": "napi build --platform --manifest-path Cargo.toml --output-dir native --js binding.js --dts binding.d.ts",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:native && npm run build:ts",
+    "test": "npm run build && vitest run"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.16.0",
+    "@napi-rs/cli": "^3.7.2",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

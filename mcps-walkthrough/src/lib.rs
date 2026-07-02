@@ -774,6 +774,31 @@ pub fn tool_call(id: &str, tool: &str, arguments: Value) -> Value {
     })
 }
 
+/// A plain `tools/call` continuation request — the ADR-MCPS-047 answer leg. The same
+/// tool + `arguments` as the original call, plus the `inputResponses` and the echoed
+/// opaque `requestState` from the `InputRequiredResult`. A driver that supports
+/// multi-round-trip binds this to the verified elicitation and signs a continuation;
+/// the plain client is unaware of the MCP-S binding.
+pub fn tool_call_continuation(
+    id: &str,
+    tool: &str,
+    arguments: Value,
+    input_responses: Value,
+    request_state: &str,
+) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": tool,
+            "arguments": arguments,
+            "inputResponses": input_responses,
+            "requestState": request_state,
+        }
+    })
+}
+
 /// Extract `result.structuredContent` from a plain response (panics on an error
 /// response, surfacing the wire reason).
 pub fn structured(response: &Value) -> &Value {

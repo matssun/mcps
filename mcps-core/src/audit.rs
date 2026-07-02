@@ -96,6 +96,8 @@ pub fn reason_label(error: &McpsError) -> &'static str {
         McpsError::AuthorizationBindingMalformed => "authorization_binding malformed",
         McpsError::AuthorizationBindingProfileRequired => "authorization_binding profile required",
         McpsError::AuthorizationBindingAmbiguousBytes => "authorization_binding ambiguous bytes",
+        McpsError::ContinuationTypeUnsupported => "continuation type unsupported",
+        McpsError::ContinuationMalformed => "continuation malformed",
     }
 }
 
@@ -193,7 +195,9 @@ mod tests {
             assert_eq!(ev.event_type, "mcps.request.rejected");
             assert_eq!(ev.decision, Decision::Rejected);
             // No interpreted sub-name leaked into the token.
-            assert!(!ev.reason.unwrap().contains("mismatch") || err == McpsError::ResponseHashMismatch);
+            assert!(
+                !ev.reason.unwrap().contains("mismatch") || err == McpsError::ResponseHashMismatch
+            );
         }
     }
 
@@ -223,4 +227,3 @@ mod tests {
         }
     }
 }
-
