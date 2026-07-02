@@ -1,0 +1,52 @@
+# Tier-1 local guardrail — fast checks on `git commit` / `git push`, so the deep CodeQL
+# scan (Tier 2) stays off your inner loop and runs only in the merge queue / weekly.
+#
+# One-time setup:
+#   pipx install pre-commit          # or: pip install pre-commit
+#   pre-commit install               # wires the commit-stage hooks
+#   pre-commit install --hook-type pre-push   # wires the Semgrep security sweep
+#
+# Deliberate omissions (this repo is NOT fmt/clippy-clean by design — CI keeps them
+# advisory — and has no ruff/eslint config, so blocking on them would fail on legacy code,
+# i.e. the opposite of "less annoying"):
+#   - no `cargo fmt --check` / `clippy -D warnings`
+#   - no python/ts linter
+# Add those later if/when you decide to make the tree clean.
+
+repos:
+  # Generic hygiene — instant, near-zero false positives, only touches files you stage.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-yaml
+      - id: check-json
+      - id: detect-private-key
+        # Demo/test fixtures carry deterministic keys + seeds on purpose — never flag them
+        # (this is the local mirror of the CodeQL test-path exclusion).
+        exclude: '(^|/)(tests?|examples|fixtures)/'
+
+  # The "catch security smells fast, locally" tier (Semgrep). Runs at PUSH time (not on
+  # every commit) so quick commits stay instant. Scoped to exclude test/example/fixture
+  # code so it does NOT reproduce the CodeQL test-FP noise. `p/secrets` is a low-FP pack;
+  # add `p/rust`, `p/javascript`, `p/python` if you want more coverage. Bump `rev` to the
+  # latest release periodically.
+  - repo: https://github.com/semgrep/semgrep
+    rev: v1.75.0
+    hooks:
+      - id: semgrep
+        stages: [pre-push]
+        args:
+          - "--config=p/secrets"
+          - "--error"
+          - "--quiet"
+          - "--exclude=tests"
+          - "--exclude=test"
+          - "--exclude=examples"
+          - "--exclude=fixtures"
+          - "--exclude=dist"
+          - "--exclude=native"
