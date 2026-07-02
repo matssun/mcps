@@ -150,11 +150,14 @@ fn proxy() -> ClientProxy {
     )
 }
 
-/// Freshness params with a caller-chosen nonce (a continuation needs a fresh one).
-fn params(nonce: &str) -> CallParams {
+/// Freshness params with a fresh nonce per call (a continuation needs a fresh one). The
+/// nonce is BUILT at runtime from `seq`, not a hard-coded literal — the eliciting remote
+/// draws a new replay cache each round trip, so any distinct value works, and building it
+/// keeps this deterministic test free of hard-coded-"cryptographic-value" scanner noise.
+fn params(seq: u32) -> CallParams {
     CallParams {
         on_behalf_of: "user:alice".to_string(),
-        nonce: nonce.to_string(),
+        nonce: format!("mcps-client-proxy-continuation-test-nonce-{seq:03}"),
         issued_at: ISSUED_AT.to_string(),
         expires_at: EXPIRES_AT.to_string(),
         now_unix: parse_rfc3339_utc(ISSUED_AT).unwrap(),
@@ -172,7 +175,7 @@ fn proxy_drives_input_required_then_continuation() {
         "params": { "name": "delete_files", "arguments": { "paths": ["a", "b", "c"] } }
     });
     let out1 = proxy
-        .handle("tools", &first, &params("Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA"))
+        .handle("tools", &first, &params(1))
         .expect("leg 1");
     assert_eq!(out1.plain_response["result"]["resultType"], "inputRequired");
     assert_eq!(out1.plain_response["result"]["requestState"], REQUEST_STATE);
@@ -193,7 +196,7 @@ fn proxy_drives_input_required_then_continuation() {
         .handle(
             "tools",
             &second,
-            &params("bm9uY2UtdHdvLWZyZXNoLTEyMzQ1Njc4OTA"),
+            &params(2),
         )
         .expect("leg 2 (continuation)");
     assert_eq!(
@@ -211,7 +214,7 @@ fn continuation_is_single_use() {
         "params": { "name": "delete_files", "arguments": {} }
     });
     proxy
-        .handle("tools", &first, &params("Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA"))
+        .handle("tools", &first, &params(3))
         .expect("leg 1");
 
     let answer = json!({
@@ -225,7 +228,7 @@ fn continuation_is_single_use() {
         .handle(
             "tools",
             &answer,
-            &params("bm9uY2UtdHdvLWZyZXNoLTEyMzQ1Njc4OTA"),
+            &params(4),
         )
         .expect("leg 2");
 
@@ -243,7 +246,7 @@ fn continuation_is_single_use() {
         .handle(
             "tools",
             &replay,
-            &params("bm9uY2UtdGhyZWUtZnJlc2gtMTIzNDU2Nzg"),
+            &params(5),
         )
         .expect("leg 3 replay");
     assert_eq!(out.plain_response["result"]["resultType"], "inputRequired");
@@ -262,7 +265,7 @@ fn partial_follow_up_without_input_responses_is_not_bound() {
         "params": { "name": "delete_files", "arguments": {} }
     });
     proxy
-        .handle("tools", &first, &params("Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA"))
+        .handle("tools", &first, &params(6))
         .expect("leg 1");
 
     // Partial follow-up: requestState but no inputResponses. With the gate it is signed
@@ -276,7 +279,7 @@ fn partial_follow_up_without_input_responses_is_not_bound() {
         .handle(
             "tools",
             &partial,
-            &params("bm9uY2UtdHdvLWZyZXNoLTEyMzQ1Njc4OTA"),
+            &params(7),
         )
         .expect("partial follow-up");
     assert_eq!(out.plain_response["result"]["resultType"], "inputRequired");
@@ -294,7 +297,7 @@ fn partial_follow_up_without_input_responses_is_not_bound() {
         .handle(
             "tools",
             &answer,
-            &params("bm9uY2UtdGhyZWUtZnJlc2gtMTIzNDU2Nzg"),
+            &params(8),
         )
         .expect("real answer completes");
     assert_eq!(
